@@ -96,7 +96,7 @@ actual class MpvMediampPlayer (
         // handle.option("gpu-shader-cache-dir", File(cacheDir, "mpv_gpu_cache").absolutePath)
         // handle.option("icc-cache-dir", File(cacheDir, "mpv_icc_cache").absolutePath)
         handle.option("profile", "fast")
-        handle.option("vo", "gpu-next")
+        handle.option("vo", "gpu")
 
         when (currentPlatform()) {
             is Platform.Android -> {
@@ -105,16 +105,15 @@ actual class MpvMediampPlayer (
                 handle.option("ao", "audiotrack,opensles")
             }
             is Platform.Windows -> {
-                handle.option("gpu-context", "d3d11")
+                // Use win (WGL) for OpenGL render context compatibility
+                handle.option("gpu-context", "win")
                 handle.option("opengl-es", "no")
-
-                handle.option("ao", "audiotrack")
+                handle.option("ao", "wasapi")
             }
             is Platform.MacOS -> {
-                handle.option("gpu-context", "macvk")
+                handle.option("gpu-context", "cocoa")
                 handle.option("opengl-es", "no")
-
-                handle.option("ao", "audiotrack")
+                handle.option("ao", "coreaudio")
             }
 
             else -> { }

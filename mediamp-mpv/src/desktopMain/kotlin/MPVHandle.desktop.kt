@@ -11,9 +11,13 @@ package org.openani.mediamp.mpv
 
 
 internal actual fun attachSurface(ptr: Long, surface: Any): Boolean {
-    TODO("Not yet implemented")
+    // Desktop uses render context approach instead of surface attachment
+    // The render context is created/managed via MPVHandle.createRenderContext()
+    return true
 }
 
 internal actual fun detachSurface(ptr: Long): Boolean {
-    TODO()
+    // Desktop uses render context approach
+    // The render context is destroyed via MPVHandle.destroyRenderContext()
+    return true
 }

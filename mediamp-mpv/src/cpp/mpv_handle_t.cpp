@@ -145,15 +145,15 @@ bool mpv_handle_t::detach_android_surface(JNIEnv *env) {
     FP;
     LOCK(surface_access_lock);
     CHECK_HANDLE()
-    
+
 #ifdef __ANDROID__
     if (!surface_attached_) return false;
-    
+
     int64_t wid = 0;
     bool result = mpv_set_option(handle_, "wid", MPV_FORMAT_INT64, (void*) &wid);
     env->DeleteGlobalRef(surface_);
     surface_attached_ = false;
-    
+
     return result;
 #else
     LOG("detach_android_surface is only implemented on Android");
@@ -161,22 +161,76 @@ bool mpv_handle_t::detach_android_surface(JNIEnv *env) {
 #endif
 }
 
+// Desktop render context methods
+
+bool mpv_handle_t::create_render_context(int width, int height) {
+    FP;
+    LOCK(surface_access_lock);
+    CHECK_HANDLE()
+
+    if (render_context_) {
+        delete render_context_;
+        render_context_ = nullptr;
+    }
+
+    render_context_ = new render_context_t(handle_, width, height);
+    if (!render_context_->isValid()) {
+        delete render_context_;
+        render_context_ = nullptr;
+        return false;
+    }
+
+    return true;
+}
+
+bool mpv_handle_t::render_frame() {
+    if (!render_context_) return false;
+    return render_context_->render();
+}
+
+bool mpv_handle_t::resize_render_context(int width, int height) {
+    if (!render_context_) return false;
+    return render_context_->resize(width, height);
+}
+
+void mpv_handle_t::destroy_render_context() {
+    if (render_context_) {
+        delete render_context_;
+        render_context_ = nullptr;
+    }
+}
+
+const uint8_t *mpv_handle_t::get_render_pixels() const {
+    return render_context_ ? render_context_->getPixelBuffer() : nullptr;
+}
+
+int mpv_handle_t::get_render_width() const {
+    return render_context_ ? render_context_->getWidth() : 0;
+}
+
+int mpv_handle_t::get_render_height() const {
+    return render_context_ ? render_context_->getHeight() : 0;
+}
+
 bool mpv_handle_t::destroy(JNIEnv *env) {
     FP;
     CHECK_HANDLE()
-    
+
+    // Destroy render context before mpv handle
+    destroy_render_context();
+
     event_loop_request_exit = true;
     mpv_wakeup(handle_);
-    
+
     if (!event_thread_) {
         LOG("event thread is not created when destroy mpv handle");
         return false;
     }
     event_thread_->join();
-    
+
     if (event_listener_) env->DeleteGlobalRef(*event_listener_);
     mpv_terminate_destroy(handle_);
-    
+
     return true;
 }
 

@@ -74,6 +74,36 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         return nUnobserveProperty(ptr, replyData)
     }
 
+    // Desktop render context methods
+
+    fun createRenderContext(width: Int, height: Int): Boolean {
+        return nCreateRenderContext(ptr, width, height)
+    }
+
+    fun renderFrame(): Boolean {
+        return nRenderFrame(ptr)
+    }
+
+    fun resizeRenderContext(width: Int, height: Int): Boolean {
+        return nResizeRenderContext(ptr, width, height)
+    }
+
+    fun destroyRenderContext() {
+        nDestroyRenderContext(ptr)
+    }
+
+    fun getRenderPixels(): ByteArray? {
+        return nGetRenderPixels(ptr)
+    }
+
+    fun getRenderWidth(): Int {
+        return nGetRenderWidth(ptr)
+    }
+
+    fun getRenderHeight(): Int {
+        return nGetRenderHeight(ptr)
+    }
+
     /**
      * Stop this `mpv_context` instance, which will run into the unrecoverable state.
      *
@@ -155,6 +185,15 @@ internal expect fun attachSurface(ptr: Long, surface: Any): Boolean
  * Detach current render surface of the mpv context.
  */
 internal expect fun detachSurface(ptr: Long): Boolean
+
+// Desktop render context native methods
+private external fun nCreateRenderContext(ptr: Long, width: Int, height: Int): Boolean
+private external fun nRenderFrame(ptr: Long): Boolean
+private external fun nResizeRenderContext(ptr: Long, width: Int, height: Int): Boolean
+private external fun nDestroyRenderContext(ptr: Long)
+private external fun nGetRenderPixels(ptr: Long): ByteArray?
+private external fun nGetRenderWidth(ptr: Long): Int
+private external fun nGetRenderHeight(ptr: Long): Int
 
 private external fun nDestroy(ptr: Long): Boolean
 private external fun nFinalize(ptr: Long)

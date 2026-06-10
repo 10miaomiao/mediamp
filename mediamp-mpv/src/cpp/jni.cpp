@@ -6,6 +6,7 @@
 
 #define FN(name) Java_org_openani_mediamp_mpv_MPVHandleKt_##name
 #define FN_ANDROID(name) Java_org_openani_mediamp_mpv_MPVHandleAndroid_##name
+#define FN_DESKTOP(name) Java_org_openani_mediamp_mpv_MPVHandleDesktop_##name
 
 extern "C" {
     JNIEXPORT jboolean JNICALL FN(nGlobalInit)(JNIEnv *env, jclass clazz);
@@ -39,6 +40,15 @@ extern "C" {
     // renderer
     JNIEXPORT jboolean JNICALL FN_ANDROID(nAttachAndroidSurface)(JNIEnv *env, jclass clazz, jlong ptr, jobject surface);
     JNIEXPORT jboolean JNICALL FN_ANDROID(nDetachAndroidSurface)(JNIEnv *env, jclass clazz, jlong ptr);
+
+    // desktop render context
+    JNIEXPORT jboolean JNICALL FN_DESKTOP(nCreateRenderContext)(JNIEnv *env, jclass clazz, jlong ptr, jint width, jint height);
+    JNIEXPORT jboolean JNICALL FN_DESKTOP(nRenderFrame)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT jboolean JNICALL FN_DESKTOP(nResizeRenderContext)(JNIEnv *env, jclass clazz, jlong ptr, jint width, jint height);
+    JNIEXPORT void JNICALL FN_DESKTOP(nDestroyRenderContext)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT jbyteArray JNICALL FN_DESKTOP(nGetRenderPixels)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT jint JNICALL FN_DESKTOP(nGetRenderWidth)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT jint JNICALL FN_DESKTOP(nGetRenderHeight)(JNIEnv *env, jclass clazz, jlong ptr);
     
 /**
  * 关闭此 mpv_handle_t 实例
@@ -242,4 +252,50 @@ JNIEXPORT jboolean JNICALL FN(nDestroy)(JNIEnv *env, jclass clazz, jlong ptr) {
 JNIEXPORT void JNICALL FN(nFinalize)(JNIEnv *env, jclass clazz, jlong ptr) {
     auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
     delete instance;
+}
+
+// Desktop render context JNI implementations
+
+JNIEXPORT jboolean JNICALL FN_DESKTOP(nCreateRenderContext)(JNIEnv *env, jclass clazz, jlong ptr, jint width, jint height) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->create_render_context(width, height);
+}
+
+JNIEXPORT jboolean JNICALL FN_DESKTOP(nRenderFrame)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->render_frame();
+}
+
+JNIEXPORT jboolean JNICALL FN_DESKTOP(nResizeRenderContext)(JNIEnv *env, jclass clazz, jlong ptr, jint width, jint height) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->resize_render_context(width, height);
+}
+
+JNIEXPORT void JNICALL FN_DESKTOP(nDestroyRenderContext)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    instance->destroy_render_context();
+}
+
+JNIEXPORT jbyteArray JNICALL FN_DESKTOP(nGetRenderPixels)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    const uint8_t *pixels = instance->get_render_pixels();
+    int width = instance->get_render_width();
+    int height = instance->get_render_height();
+
+    if (!pixels || width <= 0 || height <= 0) return nullptr;
+
+    jsize size = width * height * 4;
+    jbyteArray result = env->NewByteArray(size);
+    env->SetByteArrayRegion(result, 0, size, reinterpret_cast<const jbyte*>(pixels));
+    return result;
+}
+
+JNIEXPORT jint JNICALL FN_DESKTOP(nGetRenderWidth)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->get_render_width();
+}
+
+JNIEXPORT jint JNICALL FN_DESKTOP(nGetRenderHeight)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->get_render_height();
 }

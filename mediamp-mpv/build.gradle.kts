@@ -17,6 +17,8 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 plugins {
     kotlin("multiplatform")
     id("com.android.kotlin.multiplatform.library")
+    kotlin("plugin.compose")
+    id("org.jetbrains.compose")
 
     `mpp-lib-targets`
     id(libs.plugins.vanniktech.mavenPublish.get().pluginId)
@@ -53,6 +55,12 @@ kotlin {
         }
         getByName("jvmMain").dependencies {
             implementation(projects.mediampNativeLoader)
+        }
+        getByName("desktopMain").dependencies {
+            api(compose.desktop.currentOs) {
+                exclude(compose.material) // We use material3
+            }
+            implementation(projects.mediampCompose)
         }
     }
 }

@@ -11,6 +11,7 @@
 #include <mpv/client.h>
 #include "compatible_thread.h"
 #include "log.h"
+#include "render_context_t.h"
 
 namespace mediampv {
 
@@ -35,7 +36,16 @@ public:
     
     bool attach_android_surface(JNIEnv *env, jobject surface);
     bool detach_android_surface(JNIEnv *env);
-    
+
+    // Desktop render context
+    bool create_render_context(int width, int height);
+    bool render_frame();
+    bool resize_render_context(int width, int height);
+    void destroy_render_context();
+    const uint8_t *get_render_pixels() const;
+    int get_render_width() const;
+    int get_render_height() const;
+
 private:
     JavaVM *jvm_;
     mpv_handle *handle_;
@@ -46,6 +56,8 @@ private:
     bool surface_attached_ = false;
     jobject surface_;
 #endif
+
+    render_context_t *render_context_ = nullptr;
 
     std::shared_ptr<mediampv::compatible_thread> event_thread_;
     bool event_loop_request_exit = false;
