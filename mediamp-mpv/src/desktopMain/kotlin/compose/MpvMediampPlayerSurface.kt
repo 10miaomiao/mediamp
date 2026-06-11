@@ -78,10 +78,15 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
     private val skiaBitmap = Bitmap()
     @Volatile
     private var pixelBuffer = ByteArray(RENDER_WIDTH * RENDER_HEIGHT * 4)
+    private val sizeOut = IntArray(2) // [width, height] from native
 
     private var renderThread: Thread? = null
     @Volatile
     private var running = false
+
+    // Track bitmap dimensions to avoid redundant allocPixels
+    private var bitmapW = 0
+    private var bitmapH = 0
 
     fun start() {
         if (running) return
@@ -98,19 +103,23 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                     if (!running) break
 
                     if (handle.renderSwFrame()) {
-                        val w = handle.getVideoWidth()
-                        val h = handle.getVideoHeight()
-
-                        if (w > 0 && h > 0) {
-                            val neededSize = w * h * 4
-                            if (pixelBuffer.size < neededSize) {
-                                pixelBuffer = ByteArray(neededSize)
-                            }
-                            if (handle.copySwPixels(pixelBuffer)) {
+                        val neededSize = handle.getSwWidth() * handle.getSwHeight() * 4
+                        if (pixelBuffer.size < neededSize) {
+                            pixelBuffer = ByteArray(neededSize)
+                        }
+                        if (handle.copySwPixels(pixelBuffer, sizeOut)) {
+                            val w = sizeOut[0]
+                            val h = sizeOut[1]
+                            if (w > 0 && h > 0) {
                                 val buf = pixelBuffer
                                 SwingUtilities.invokeLater {
+                                    if (w != bitmapW || h != bitmapH) {
+                                        bitmapW = w
+                                        bitmapH = h
+                                        val imageInfo = ImageInfo.makeN32Premul(w, h)
+                                        skiaBitmap.allocPixels(imageInfo)
+                                    }
                                     val imageInfo = ImageInfo.makeN32Premul(w, h)
-                                    skiaBitmap.allocPixels(imageInfo)
                                     skiaBitmap.installPixels(imageInfo, buf, w * 4)
                                     bitmapState.value = skiaBitmap.asComposeImageBitmap()
                                 }

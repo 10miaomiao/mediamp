@@ -92,8 +92,8 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         nDestroySwRenderContext(ptr)
     }
 
-    fun copySwPixels(outArray: ByteArray): Boolean {
-        return nCopySwPixels(ptr, outArray)
+    fun copySwPixels(outArray: ByteArray, outSize: IntArray): Boolean {
+        return nCopySwPixels(ptr, outArray, outSize)
     }
 
     fun getSwWidth(): Int {
@@ -203,7 +203,7 @@ internal expect fun detachSurface(ptr: Long): Boolean
 private external fun nCreateSwRenderContext(ptr: Long, width: Int, height: Int): Boolean
 private external fun nRenderSwFrame(ptr: Long): Boolean
 private external fun nDestroySwRenderContext(ptr: Long)
-private external fun nCopySwPixels(ptr: Long, outArray: ByteArray): Boolean
+private external fun nCopySwPixels(ptr: Long, outArray: ByteArray, outSize: IntArray): Boolean
 private external fun nGetSwWidth(ptr: Long): Int
 private external fun nGetSwHeight(ptr: Long): Int
 private external fun nGetVideoWidth(ptr: Long): Int

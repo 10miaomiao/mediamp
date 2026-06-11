@@ -49,6 +49,7 @@ public:
     int get_video_width() const;
     int get_video_height() const;
     void wait_for_frame();
+    bool copy_sw_pixels(uint8_t *out, int out_size, int *out_width, int *out_height);
 
 private:
     JavaVM *jvm_;
@@ -63,7 +64,8 @@ private:
 
     // Software render context (vo=libmpv)
     mpv_render_context *sw_render_ctx_ = nullptr;
-    uint8_t *sw_pixel_buffer_ = nullptr;
+    uint8_t *sw_pixel_buffer_ = nullptr;   // back buffer (mpv writes here)
+    uint8_t *sw_front_buffer_ = nullptr;   // front buffer (display reads here)
     int sw_width_ = 0;
     int sw_height_ = 0;
     int video_width_ = 0;

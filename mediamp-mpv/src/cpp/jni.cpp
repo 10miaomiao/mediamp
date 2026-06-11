@@ -46,7 +46,7 @@ extern "C" {
     JNIEXPORT jboolean JNICALL FN(nCreateSwRenderContext)(JNIEnv *env, jclass clazz, jlong ptr, jint width, jint height);
     JNIEXPORT jboolean JNICALL FN(nRenderSwFrame)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT void JNICALL FN(nDestroySwRenderContext)(JNIEnv *env, jclass clazz, jlong ptr);
-    JNIEXPORT jboolean JNICALL FN(nCopySwPixels)(JNIEnv *env, jclass clazz, jlong ptr, jbyteArray outArray);
+    JNIEXPORT jboolean JNICALL FN(nCopySwPixels)(JNIEnv *env, jclass clazz, jlong ptr, jbyteArray outArray, jintArray outSize);
     JNIEXPORT jint JNICALL FN(nGetSwWidth)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT jint JNICALL FN(nGetSwHeight)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT jint JNICALL FN(nGetVideoWidth)(JNIEnv *env, jclass clazz, jlong ptr);
@@ -300,20 +300,21 @@ JNIEXPORT void JNICALL FN(nDestroySwRenderContext)(JNIEnv *env, jclass clazz, jl
     instance->destroy_sw_render_context();
 }
 
-JNIEXPORT jboolean JNICALL FN(nCopySwPixels)(JNIEnv *env, jclass clazz, jlong ptr, jbyteArray outArray) {
+JNIEXPORT jboolean JNICALL FN(nCopySwPixels)(JNIEnv *env, jclass clazz, jlong ptr, jbyteArray outArray, jintArray outSize) {
     auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
-    const uint8_t *pixels = instance->get_sw_pixels();
-    int width = instance->get_sw_width();
-    int height = instance->get_sw_height();
 
-    if (!pixels || width <= 0 || height <= 0) return false;
-
-    jsize size = width * height * 4;
     jsize arrayLen = env->GetArrayLength(outArray);
-    if (arrayLen < size) return false;
+    int out_w = 0, out_h = 0;
 
-    env->SetByteArrayRegion(outArray, 0, size, reinterpret_cast<const jbyte*>(pixels));
-    return true;
+    jbyte *dst = env->GetByteArrayElements(outArray, nullptr);
+    bool ok = instance->copy_sw_pixels(reinterpret_cast<uint8_t*>(dst), arrayLen, &out_w, &out_h);
+    env->ReleaseByteArrayElements(outArray, dst, ok ? 0 : JNI_ABORT);
+
+    if (ok) {
+        jint size[2] = {out_w, out_h};
+        env->SetIntArrayRegion(outSize, 0, 2, size);
+    }
+    return ok;
 }
 
 JNIEXPORT jint JNICALL FN(nGetSwWidth)(JNIEnv *env, jclass clazz, jlong ptr) {

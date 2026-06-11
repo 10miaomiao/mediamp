@@ -179,7 +179,9 @@ bool mpv_handle_t::create_sw_render_context(int width, int height) {
     sw_width_ = width;
     sw_height_ = height;
     sw_pixel_buffer_ = new uint8_t[width * height * 4];
+    sw_front_buffer_ = new uint8_t[width * height * 4];
     memset(sw_pixel_buffer_, 0, width * height * 4);
+    memset(sw_front_buffer_, 0, width * height * 4);
 
     int mpv_advanced = 1;
     const char *api_type = MPV_RENDER_API_TYPE_SW;
@@ -193,7 +195,9 @@ bool mpv_handle_t::create_sw_render_context(int width, int height) {
     if (result < 0) {
         LOG("Failed to create SW mpv render context: %d", result);
         delete[] sw_pixel_buffer_;
+        delete[] sw_front_buffer_;
         sw_pixel_buffer_ = nullptr;
+        sw_front_buffer_ = nullptr;
         sw_render_ctx_ = nullptr;
         return false;
     }
@@ -231,19 +235,25 @@ bool mpv_handle_t::render_sw_frame() {
         return false;
     }
 
-    // Detect actual video resolution and resize buffer if needed
+    // Detect actual video resolution and resize buffers if needed
     if (size[0] != sw_width_ || size[1] != sw_height_) {
         int new_w = size[0];
         int new_h = size[1];
         if (new_w > 0 && new_h > 0) {
             delete[] sw_pixel_buffer_;
+            delete[] sw_front_buffer_;
             sw_width_ = new_w;
             sw_height_ = new_h;
             sw_pixel_buffer_ = new uint8_t[new_w * new_h * 4];
+            sw_front_buffer_ = new uint8_t[new_w * new_h * 4];
         }
     }
     video_width_ = size[0];
     video_height_ = size[1];
+
+    // Swap back and front buffers:
+    // mpv wrote to sw_pixel_buffer_ (back), display reads from sw_front_buffer_
+    std::swap(sw_pixel_buffer_, sw_front_buffer_);
 
     return true;
 }
@@ -256,6 +266,10 @@ void mpv_handle_t::destroy_sw_render_context() {
     if (sw_pixel_buffer_) {
         delete[] sw_pixel_buffer_;
         sw_pixel_buffer_ = nullptr;
+    }
+    if (sw_front_buffer_) {
+        delete[] sw_front_buffer_;
+        sw_front_buffer_ = nullptr;
     }
     sw_width_ = 0;
     sw_height_ = 0;
@@ -289,6 +303,16 @@ void mpv_handle_t::wait_for_frame() {
     std::unique_lock<std::mutex> lock(frame_mutex_);
     frame_cv_.wait(lock, [this] { return frame_ready_ || !sw_render_ctx_; });
     frame_ready_ = false;
+}
+
+bool mpv_handle_t::copy_sw_pixels(uint8_t *out, int out_size, int *out_width, int *out_height) {
+    if (!sw_front_buffer_ || sw_width_ <= 0 || sw_height_ <= 0) return false;
+    int size = sw_width_ * sw_height_ * 4;
+    if (out_size < size) return false;
+    memcpy(out, sw_front_buffer_, size);
+    *out_width = video_width_;
+    *out_height = video_height_;
+    return true;
 }
 
 bool mpv_handle_t::destroy(JNIEnv *env) {
