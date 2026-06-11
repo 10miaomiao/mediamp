@@ -7,6 +7,7 @@
 
 #include <mpv/client.h>
 #include <mpv/render.h>
+#include <mpv/render_gl.h>
 #include <cstdint>
 
 namespace mediampv {
@@ -14,6 +15,8 @@ namespace mediampv {
 class render_context_t {
 public:
     render_context_t(mpv_handle *mpv, int width, int height);
+    // 复用已有的隐藏窗口（用于与 vo=gpu 共享 OpenGL 上下文）
+    render_context_t(mpv_handle *mpv, int width, int height, void *existing_hwnd);
     ~render_context_t();
 
     bool isValid() const { return render_ctx_ != nullptr; }
@@ -29,6 +32,9 @@ public:
 
     // Resize the render target
     bool resize(int width, int height);
+
+    // 获取隐藏窗口的 HWND（用于设置 mpv 的 wid 选项）
+    void *getHiddenWindowHandle() const;
 
 private:
     mpv_handle *mpv_;
@@ -47,8 +53,10 @@ private:
     // Platform-specific OpenGL context
     void *gl_context_ = nullptr;
     void *gl_display_ = nullptr;
+    bool reuse_window_ = false;  // 是否复用外部窗口
 
     bool initOpenGL();
+    bool initOpenGLWithExistingHwnd(void *hwnd);
     void cleanupOpenGL();
     bool createFramebuffer();
     void destroyFramebuffer();

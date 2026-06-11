@@ -270,7 +270,7 @@ private fun MpvBuildContext.jniCompilerArgs(target: MpvBuildTarget): List<String
 
 private fun MpvBuildContext.jniLinkerArgs(target: MpvBuildTarget): List<String> {
     return when {
-        target.name == "WindowsX64" -> listOf("-lopengl32", "-ld3d11", "-ld3d12", "-ldxgi", "-ldxguid")
+        target.name == "WindowsX64" -> listOf("-lopengl32", "-lgdi32", "-ld3d11", "-ld3d12", "-ldxgi", "-ldxguid")
         target.androidAbi != null -> listOf("-landroid", "-llog")
         target.name.startsWith("Macos") -> appleArchArgs(target.name)
         target.name == "LinuxX64" -> listOf("-pthread", "-Wl,-rpath,\$ORIGIN")

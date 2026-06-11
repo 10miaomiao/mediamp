@@ -58,6 +58,10 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         return nSetPropertyBoolean(ptr, name, value)
     }
 
+    fun setPropertyStringList(name: String, values: Array<String>): Boolean {
+        return nSetPropertyStringList(ptr, name, values)
+    }
+
     fun setPropertyDouble(name: String, value: Double): Boolean {
         return nSetPropertyDouble(ptr, name, value)
     }
@@ -74,34 +78,30 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         return nUnobserveProperty(ptr, replyData)
     }
 
-    // Desktop render context methods
+    // Software render context (vo=libmpv)
 
-    fun createRenderContext(width: Int, height: Int): Boolean {
-        return nCreateRenderContext(ptr, width, height)
+    fun createSwRenderContext(width: Int, height: Int): Boolean {
+        return nCreateSwRenderContext(ptr, width, height)
     }
 
-    fun renderFrame(): Boolean {
-        return nRenderFrame(ptr)
+    fun renderSwFrame(): Boolean {
+        return nRenderSwFrame(ptr)
     }
 
-    fun resizeRenderContext(width: Int, height: Int): Boolean {
-        return nResizeRenderContext(ptr, width, height)
+    fun destroySwRenderContext() {
+        nDestroySwRenderContext(ptr)
     }
 
-    fun destroyRenderContext() {
-        nDestroyRenderContext(ptr)
+    fun copySwPixels(outArray: ByteArray): Boolean {
+        return nCopySwPixels(ptr, outArray)
     }
 
-    fun getRenderPixels(): ByteArray? {
-        return nGetRenderPixels(ptr)
+    fun getSwWidth(): Int {
+        return nGetSwWidth(ptr)
     }
 
-    fun getRenderWidth(): Int {
-        return nGetRenderWidth(ptr)
-    }
-
-    fun getRenderHeight(): Int {
-        return nGetRenderHeight(ptr)
+    fun getSwHeight(): Int {
+        return nGetSwHeight(ptr)
     }
 
     /**
@@ -169,6 +169,7 @@ private external fun nGetPropertyDouble(ptr: Long, name: String): Double
 private external fun nGetPropertyString(ptr: Long, name: String): String
 private external fun nSetPropertyInt(ptr: Long, name: String, value: Int): Boolean
 private external fun nSetPropertyBoolean(ptr: Long, name: String, value: Boolean): Boolean
+private external fun nSetPropertyStringList(ptr: Long, name: String, values: Array<String>): Boolean
 private external fun nSetPropertyDouble(ptr: Long, name: String, value: Double): Boolean
 private external fun nSetPropertyString(ptr: Long, name: String, value: String): Boolean
 private external fun nObserveProperty(ptr: Long, name: String, format: Int, replyData: Long): Boolean
@@ -186,14 +187,13 @@ internal expect fun attachSurface(ptr: Long, surface: Any): Boolean
  */
 internal expect fun detachSurface(ptr: Long): Boolean
 
-// Desktop render context native methods
-private external fun nCreateRenderContext(ptr: Long, width: Int, height: Int): Boolean
-private external fun nRenderFrame(ptr: Long): Boolean
-private external fun nResizeRenderContext(ptr: Long, width: Int, height: Int): Boolean
-private external fun nDestroyRenderContext(ptr: Long)
-private external fun nGetRenderPixels(ptr: Long): ByteArray?
-private external fun nGetRenderWidth(ptr: Long): Int
-private external fun nGetRenderHeight(ptr: Long): Int
+// Software render context native methods (vo=libmpv)
+private external fun nCreateSwRenderContext(ptr: Long, width: Int, height: Int): Boolean
+private external fun nRenderSwFrame(ptr: Long): Boolean
+private external fun nDestroySwRenderContext(ptr: Long)
+private external fun nCopySwPixels(ptr: Long, outArray: ByteArray): Boolean
+private external fun nGetSwWidth(ptr: Long): Int
+private external fun nGetSwHeight(ptr: Long): Int
 
 private external fun nDestroy(ptr: Long): Boolean
 private external fun nFinalize(ptr: Long)

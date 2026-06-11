@@ -26,6 +26,9 @@
     #define GL_RENDERBUFFER                   0x8D41
     #define GL_DEPTH_ATTACHMENT               0x8D00
     #define GL_DEPTH_COMPONENT24              0x81A6
+    #define GL_RGBA8                          0x8058
+    #define GL_BGRA                           0x80E1
+    #define GL_FRAMEBUFFER_COMPLETE           0x8CD5
 #elif defined(__APPLE__)
     #include <OpenGL/gl.h>
     #include <OpenGL/CGLTypes.h>
@@ -48,6 +51,7 @@ typedef void (APIENTRY *PFNGLRENDERBUFFERSTORAGEPROC)(GLenum, GLenum, GLsizei, G
 typedef void (APIENTRY *PFNGLFRAMEBUFFERRENDERBUFFERPROC)(GLenum, GLenum, GLenum, GLuint);
 typedef void (APIENTRY *PFNGLDELETERENDERBUFFERSPROC)(GLsizei, const GLuint*);
 typedef void (APIENTRY *PFNGLDELETEFRAMEBUFFERSPROC)(GLsizei, const GLuint*);
+typedef GLenum (APIENTRY *PFNGLCHECKFRAMEBUFFERSTATUSPROC)(GLenum);
 static PFNGLGENFRAMEBUFFERSPROC _glGenFramebuffers = nullptr;
 static PFNGLBINDFRAMEBUFFERPROC _glBindFramebuffer = nullptr;
 static PFNGLFRAMEBUFFERTEXTURE2DPROC _glFramebufferTexture2D = nullptr;
@@ -57,6 +61,7 @@ static PFNGLRENDERBUFFERSTORAGEPROC _glRenderbufferStorage = nullptr;
 static PFNGLFRAMEBUFFERRENDERBUFFERPROC _glFramebufferRenderbuffer = nullptr;
 static PFNGLDELETERENDERBUFFERSPROC _glDeleteRenderbuffers = nullptr;
 static PFNGLDELETEFRAMEBUFFERSPROC _glDeleteFramebuffers = nullptr;
+static PFNGLCHECKFRAMEBUFFERSTATUSPROC _glCheckFramebufferStatus = nullptr;
 #define glGenFramebuffers _glGenFramebuffers
 #define glBindFramebuffer _glBindFramebuffer
 #define glFramebufferTexture2D _glFramebufferTexture2D
@@ -66,6 +71,7 @@ static PFNGLDELETEFRAMEBUFFERSPROC _glDeleteFramebuffers = nullptr;
 #define glFramebufferRenderbuffer _glFramebufferRenderbuffer
 #define glDeleteRenderbuffers _glDeleteRenderbuffers
 #define glDeleteFramebuffers _glDeleteFramebuffers
+#define glCheckFramebufferStatus _glCheckFramebufferStatus
 #else
 // On Linux/macOS, use standard GL extensions
 #ifndef GL_GLEXT_PROTOTYPES
@@ -129,6 +135,7 @@ static void loadGLFunctions() {
     _glFramebufferRenderbuffer = (PFNGLFRAMEBUFFERRENDERBUFFERPROC)wglGetProcAddress("glFramebufferRenderbuffer");
     _glDeleteRenderbuffers = (PFNGLDELETERENDERBUFFERSPROC)wglGetProcAddress("glDeleteRenderbuffers");
     _glDeleteFramebuffers = (PFNGLDELETEFRAMEBUFFERSPROC)wglGetProcAddress("glDeleteFramebuffers");
+    _glCheckFramebufferStatus = (PFNGLCHECKFRAMEBUFFERSTATUSPROC)wglGetProcAddress("glCheckFramebufferStatus");
 }
 
 #elif !defined(__APPLE__)
@@ -177,10 +184,11 @@ render_context_t::render_context_t(mpv_handle *mpv, int width, int height)
         .get_proc_address_ctx = gl_context_,
     };
 
+    int advanced_control = 1;
     mpv_render_param params[] = {
         {MPV_RENDER_PARAM_API_TYPE, const_cast<char*>(MPV_RENDER_API_TYPE_OPENGL)},
         {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl_init_params},
-        {MPV_RENDER_PARAM_ADVANCED_CONTROL, &(int){1}},
+        {MPV_RENDER_PARAM_ADVANCED_CONTROL, &advanced_control},
         {MPV_RENDER_PARAM_INVALID, nullptr},
     };
 
@@ -195,6 +203,61 @@ render_context_t::render_context_t(mpv_handle *mpv, int width, int height)
 
     pixel_buffer_ = new uint8_t[width_ * height_ * 4];
     LOG("MPV render context created: %dx%d", width_, height_);
+}
+
+render_context_t::render_context_t(mpv_handle *mpv, int width, int height, void *existing_hwnd)
+    : mpv_(mpv), width_(width), height_(height), reuse_window_(true) {
+    if (!initOpenGLWithExistingHwnd(existing_hwnd)) {
+        LOG("Failed to initialize OpenGL context with existing HWND");
+        return;
+    }
+
+    if (!createFramebuffer()) {
+        LOG("Failed to create framebuffer");
+        cleanupOpenGL();
+        return;
+    }
+
+    // Create mpv render context
+    mpv_opengl_init_params gl_init_params = {
+        .get_proc_address = [](void *ctx, const char *name) -> void* {
+#if defined(_WIN32) || defined(_WIN64)
+            void *proc = (void*)wglGetProcAddress(name);
+            if (!proc) {
+                auto *data = static_cast<PlatformGLData*>(ctx);
+                if (data && data->opengl32) {
+                    proc = (void*)GetProcAddress(data->opengl32, name);
+                }
+            }
+            return proc;
+#elif defined(__APPLE__)
+            return nullptr;
+#else
+            return (void*)eglGetProcAddress(name);
+#endif
+        },
+        .get_proc_address_ctx = gl_context_,
+    };
+
+    int advanced_control = 1;
+    mpv_render_param params[] = {
+        {MPV_RENDER_PARAM_API_TYPE, const_cast<char*>(MPV_RENDER_API_TYPE_OPENGL)},
+        {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl_init_params},
+        {MPV_RENDER_PARAM_ADVANCED_CONTROL, &advanced_control},
+        {MPV_RENDER_PARAM_INVALID, nullptr},
+    };
+
+    int result = mpv_render_context_create(&render_ctx_, mpv_, params);
+    if (result < 0) {
+        LOG("Failed to create mpv render context: %d", result);
+        destroyFramebuffer();
+        cleanupOpenGL();
+        render_ctx_ = nullptr;
+        return;
+    }
+
+    pixel_buffer_ = new uint8_t[width_ * height_ * 4];
+    LOG("MPV render context created with existing HWND: %dx%d", width_, height_);
 }
 
 render_context_t::~render_context_t() {
@@ -335,6 +398,45 @@ bool render_context_t::initOpenGL() {
 #endif
 }
 
+bool render_context_t::initOpenGLWithExistingHwnd(void *hwnd) {
+#if defined(_WIN32) || defined(_WIN64)
+    auto *data = new PlatformGLData();
+    data->hwnd = static_cast<HWND>(hwnd);
+    data->hdc = GetDC(data->hwnd);
+
+    // Set pixel format (必须与 vo=gpu 使用的一致)
+    PIXELFORMATDESCRIPTOR pfd = {};
+    pfd.nSize = sizeof(pfd);
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
+    pfd.cDepthBits = 24;
+    pfd.iLayerType = PFD_MAIN_PLANE;
+
+    int format = ChoosePixelFormat(data->hdc, &pfd);
+    SetPixelFormat(data->hdc, format, &pfd);
+
+    // 创建新的 OpenGL 上下文（与 vo=gpu 的上下文共享资源）
+    data->hglrc = wglCreateContext(data->hdc);
+    if (!data->hglrc) {
+        delete data;
+        return false;
+    }
+
+    wglMakeCurrent(data->hdc, data->hglrc);
+
+    data->opengl32 = LoadLibraryA("opengl32.dll");
+    loadGLFunctions();
+
+    gl_context_ = data;
+    gl_display_ = nullptr;
+    return true;
+#else
+    return initOpenGL();
+#endif
+}
+
 void render_context_t::cleanupOpenGL() {
 #if defined(_WIN32) || defined(_WIN64)
     if (gl_context_) {
@@ -342,7 +444,8 @@ void render_context_t::cleanupOpenGL() {
         wglMakeCurrent(nullptr, nullptr);
         if (data->hglrc) wglDeleteContext(data->hglrc);
         if (data->hdc && data->hwnd) ReleaseDC(data->hwnd, data->hdc);
-        if (data->hwnd) DestroyWindow(data->hwnd);
+        // 只销毁自己创建的窗口，不销毁复用的外部窗口
+        if (data->hwnd && !reuse_window_) DestroyWindow(data->hwnd);
         if (data->opengl32) FreeLibrary(data->opengl32);
         delete data;
         gl_context_ = nullptr;
@@ -404,6 +507,16 @@ void render_context_t::destroyFramebuffer() {
 bool render_context_t::render() {
     if (!render_ctx_ || !fbo_) return false;
 
+    // 确保 OpenGL 上下文在当前线程激活（render 可能在不同于创建时的线程调用）
+#if defined(_WIN32) || defined(_WIN64)
+    if (gl_context_) {
+        auto *data = static_cast<PlatformGLData*>(gl_context_);
+        if (data->hdc && data->hglrc) {
+            wglMakeCurrent(data->hdc, data->hglrc);
+        }
+    }
+#endif
+
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
     glViewport(0, 0, width_, height_);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -433,6 +546,19 @@ bool render_context_t::render() {
     glReadPixels(0, 0, width_, height_, GL_BGRA, GL_UNSIGNED_BYTE, pixel_buffer_);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
+    // Debug: check first few pixels
+    static int render_count = 0;
+    render_count++;
+    if (render_count <= 5 || render_count % 300 == 0) {
+        bool has_content = false;
+        int check_size = (width_ * height_ * 4 < 4000) ? width_ * height_ * 4 : 4000;
+        for (int i = 0; i < check_size; i++) {
+            if (pixel_buffer_[i] != 0) { has_content = true; break; }
+        }
+        uint32_t first_pixel = *(uint32_t*)pixel_buffer_;
+        LOG("render #%d: result=%d, first_pixel=0x%08X, has_content=%d", render_count, result, first_pixel, has_content);
+    }
+
     return true;
 }
 
@@ -452,6 +578,16 @@ bool render_context_t::resize(int width, int height) {
     pixel_buffer_ = new uint8_t[width_ * height_ * 4];
 
     return true;
+}
+
+void *render_context_t::getHiddenWindowHandle() const {
+#if defined(_WIN32) || defined(_WIN64)
+    if (gl_context_) {
+        auto *data = static_cast<PlatformGLData*>(gl_context_);
+        return data->hwnd;
+    }
+#endif
+    return nullptr;
 }
 
 } // namespace mediampv

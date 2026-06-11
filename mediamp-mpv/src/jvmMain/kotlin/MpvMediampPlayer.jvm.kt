@@ -92,11 +92,8 @@ actual class MpvMediampPlayer (
         handle.setEventListener(eventListener)
 
         handle.option("config", "no")
-        // handle.option("config-dir", File(filesDir, "mpv_config").absolutePath)
-        // handle.option("gpu-shader-cache-dir", File(cacheDir, "mpv_gpu_cache").absolutePath)
-        // handle.option("icc-cache-dir", File(cacheDir, "mpv_icc_cache").absolutePath)
-        handle.option("profile", "fast")
-        handle.option("vo", "gpu")
+        // 使用 libmpv vo，由 render context 驱动渲染
+        handle.option("vo", "libmpv")
 
         when (currentPlatform()) {
             is Platform.Android -> {
@@ -105,42 +102,33 @@ actual class MpvMediampPlayer (
                 handle.option("ao", "audiotrack,opensles")
             }
             is Platform.Windows -> {
-                // Use win (WGL) for OpenGL render context compatibility
-                handle.option("gpu-context", "win")
-                handle.option("opengl-es", "no")
                 handle.option("ao", "wasapi")
             }
             is Platform.MacOS -> {
-                handle.option("gpu-context", "cocoa")
-                handle.option("opengl-es", "no")
                 handle.option("ao", "coreaudio")
             }
-
             else -> { }
         }
-        
-        
+
         handle.option("hwdec", "auto")
         handle.option("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
-        // handle.option("tls-verify", "yes")
-        // handle.option("tls-ca-file", "${this.context.filesDir.path}/cacert.pem")
         handle.option("input-default-bindings", "yes")
 
-        // Limit demuxer cache since the defaults are too high for mobile devices   
+        // Limit demuxer cache
         val cacheMegs = if (limitDemuxer()) 32 else 64
         handle.option("demuxer-max-bytes", "${cacheMegs * 1024 * 1024}")
         handle.option("demuxer-max-back-bytes", "${cacheMegs * 1024 * 1024}")
-        // screenshot
-        // handle.option("screenshot-directory", screenshotDir.path)
-        // workaround for <https://github.com/mpv-player/mpv/issues/14651>
-        handle.option("vd-lavc-film-grain", "cpu")
+
+        handle.option("save-position-on-quit", "no")
+        handle.option("idle", "yes")
+        handle.option("keep-open", "always")
 
         handle.initialize()
 
-        handle.option("save-position-on-quit", "no")
-        handle.option("force-window", "no")
-        handle.option("idle", "yes")
-        handle.option("keep-open", "always")
+        // 创建 SW render context（在 mpv_initialize 之后，loadfile 之前）
+        if (currentPlatform() !is Platform.Android) {
+            handle.createSwRenderContext(1920, 1080)
+        }
 
         handle.observeProperty("time-pos/full", MPVFormat.MPV_FORMAT_INT64)
         handle.observeProperty("duration/full", MPVFormat.MPV_FORMAT_INT64)
@@ -163,45 +151,79 @@ actual class MpvMediampPlayer (
         return detachSurface(handle.ptr)
     }
 
-    override suspend fun setMediaDataImpl(data: MediaData): MPVPlayerData = when (data) {
-        is UriMediaData -> {
-            val headers = data.headers
-            
-            // 清除播放列表
-            handle.command("stop")
-            handle.command("playlist-clear")
-            // 设置 headers 和 ua
-            handle.option("user-agent", headers["User-Agent"] ?: """Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3""")
-            handle.option("http-header-fields-clr", "")
-            headers.forEach { (key, value) ->
-                handle.option("http-header-fields", "$key: $value")
-            }
+    override suspend fun setMediaDataImpl(data: MediaData): MPVPlayerData {
+        println("[MPV] setMediaDataImpl called, data type=${data::class}, data=$data")
+        return when (data) {
+            is UriMediaData -> {
+                val headers = data.headers.toMutableMap()
+                println("[MPV] setMediaDataImpl: URI=${data.uri}")
 
-            MPVPlayerData(data)
-        }
-        is SeekableInputMediaData -> {
-            TODO()
+                // 清除播放列表和旧的外部音频轨道
+                handle.command("stop")
+                handle.command("playlist-clear")
+
+                // 设置 User-Agent（仅当 headers 中有指定时）
+                val ua = headers.remove("User-Agent") ?: headers.remove("user-agent")
+                if (ua != null) {
+                    handle.setPropertyString("user-agent", ua)
+                }
+
+                // 合并所有 HTTP 请求头为字符串列表，一次性设置
+                if (headers.isNotEmpty()) {
+                    val headerArray = headers.entries.map { "${it.key}: ${it.value}" }.toTypedArray()
+                    handle.setPropertyStringList("http-header-fields", headerArray)
+                    println("[MPV] setMediaDataImpl: http-header-fields=${headerArray.joinToString(",")}")
+                }
+
+                // 立即加载并播放，确保 HTTP 头在流打开前已生效
+                handle.setPropertyBoolean("pause", false)
+                val result = handle.command("loadfile", data.uri)
+                println("[MPV] setMediaDataImpl: loadfile result=$result")
+
+                MPVPlayerData(data)
+            }
+            is SeekableInputMediaData -> {
+                TODO()
+            }
+            else -> {
+                println("[MPV] setMediaDataImpl: unsupported data type: ${data::class}")
+                throw IllegalArgumentException("Unsupported media data type: ${data::class}")
+            }
         }
     }
 
     override fun resumeImpl() {
-        when (playbackState.value) {
+        val state = playbackState.value
+        println("[MPV] resumeImpl called, state=$state")
+        when (state) {
             PlaybackState.READY -> {
-                val media = openResource.value ?: return
-                handle.option("pause", "true")
+                val media = openResource.value
+                if (media == null) {
+                    println("[MPV] resumeImpl: openResource is null!")
+                    return
+                }
                 when (val data = media.mediaData) {
                     is UriMediaData -> {
-                        handle.command("loadfile", data.uri)
+                        // loadfile 已在 setMediaDataImpl 中调用，此处只需更新状态
                         playbackState.value = PlaybackState.PLAYING
                     }
                     is SeekableInputMediaData -> TODO()
-                    else -> { } // TODO: log unsupported media type
+                    else -> {
+                        println("[MPV] resumeImpl: unsupported media type: ${media.mediaData::class}")
+                    }
                 }
             }
-            PlaybackState.PLAYING -> {
+            PlaybackState.PAUSED -> {
+                println("[MPV] resumeImpl: unpausing")
                 handle.command("cycle", "pause")
             }
-            else -> { } // TODO: unreachable
+            PlaybackState.PLAYING -> {
+                println("[MPV] resumeImpl: toggling pause")
+                handle.command("cycle", "pause")
+            }
+            else -> {
+                println("[MPV] resumeImpl: unhandled state=$state")
+            }
         }
     }
 

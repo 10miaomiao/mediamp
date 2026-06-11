@@ -60,7 +60,6 @@ kotlin {
             api(compose.desktop.currentOs) {
                 exclude(compose.material) // We use material3
             }
-            implementation(projects.mediampCompose)
         }
     }
 }

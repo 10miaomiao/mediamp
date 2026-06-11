@@ -9,9 +9,9 @@
 #include <memory>
 #include <jni.h>
 #include <mpv/client.h>
+#include <mpv/render.h>
 #include "compatible_thread.h"
 #include "log.h"
-#include "render_context_t.h"
 
 namespace mediampv {
 
@@ -37,19 +37,18 @@ public:
     bool attach_android_surface(JNIEnv *env, jobject surface);
     bool detach_android_surface(JNIEnv *env);
 
-    // Desktop render context
-    bool create_render_context(int width, int height);
-    bool render_frame();
-    bool resize_render_context(int width, int height);
-    void destroy_render_context();
-    const uint8_t *get_render_pixels() const;
-    int get_render_width() const;
-    int get_render_height() const;
+    // Software render context (vo=libmpv)
+    bool create_sw_render_context(int width, int height);
+    bool render_sw_frame();
+    void destroy_sw_render_context();
+    const uint8_t *get_sw_pixels() const;
+    int get_sw_width() const;
+    int get_sw_height() const;
 
 private:
     JavaVM *jvm_;
     mpv_handle *handle_;
-    
+
     jobject *event_listener_ = nullptr;
 
 #ifdef __ANDROID__
@@ -57,7 +56,11 @@ private:
     jobject surface_;
 #endif
 
-    render_context_t *render_context_ = nullptr;
+    // Software render context (vo=libmpv)
+    mpv_render_context *sw_render_ctx_ = nullptr;
+    uint8_t *sw_pixel_buffer_ = nullptr;
+    int sw_width_ = 0;
+    int sw_height_ = 0;
 
     std::shared_ptr<mediampv::compatible_thread> event_thread_;
     bool event_loop_request_exit = false;

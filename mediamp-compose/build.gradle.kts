@@ -8,16 +8,7 @@
 
 import com.vanniktech.maven.publish.JavadocJar
 import com.vanniktech.maven.publish.KotlinMultiplatform
-import com.vanniktech.maven.publish.SonatypeHost
-
-/*
- * Copyright (C) 2024 OpenAni and contributors.
- *
- * 此源代码的使用受 GNU AFFERO GENERAL PUBLIC LICENSE version 3 许可证的约束, 可以在以下链接找到该许可证.
- * Use of this source code is governed by the GNU AGPLv3 license, which can be found at the following link.
- *
- * https://github.com/open-ani/ani/blob/main/LICENSE
- */
+import com.vanniktech.maven.publish.SourcesJar
 
 plugins {
     kotlin("multiplatform")
@@ -27,17 +18,15 @@ plugins {
 
     `mpp-lib-targets`
     kotlin("plugin.serialization")
-//    id("org.jetbrains.kotlinx.atomicfu")
     id(libs.plugins.vanniktech.mavenPublish.get().pluginId)
 }
 
 description = "Compose integration for MediaMP"
 
-android {
-    namespace = "org.openani.mediamp.compose"
-}
-
 kotlin {
+    androidLibrary {
+        namespace = "org.openani.mediamp.compose"
+    }
     sourceSets {
         commonMain.dependencies {
             api(projects.mediampApi)
@@ -57,6 +46,7 @@ kotlin {
         }
         desktopMain.dependencies {
             api(compose.desktop.currentOs) {
+                @Suppress("DEPRECATION")
                 exclude(compose.material) // We use material3
             }
 
@@ -69,14 +59,11 @@ kotlin {
             implementation(projects.mediampInternalUtils)
         }
     }
-    androidTarget {
-        publishLibraryVariants("release")
-    }
 }
 
 mavenPublishing {
     configure(KotlinMultiplatform(JavadocJar.Empty(), SourcesJar.Sources(), listOf("debug", "release")))
-    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
+    publishToMavenCentral()
     signAllPublicationsIfEnabled(project)
     configurePom(project)
 }
