@@ -52,6 +52,7 @@ extern "C" {
     JNIEXPORT jint JNICALL FN(nGetVideoWidth)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT jint JNICALL FN(nGetVideoHeight)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT void JNICALL FN(nWaitForFrame)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT jboolean JNICALL FN(nHasPendingFrame)(JNIEnv *env, jclass clazz, jlong ptr);
 
 /**
  * 关闭此 mpv_handle_t 实例
@@ -340,6 +341,11 @@ JNIEXPORT jint JNICALL FN(nGetVideoHeight)(JNIEnv *env, jclass clazz, jlong ptr)
 JNIEXPORT void JNICALL FN(nWaitForFrame)(JNIEnv *env, jclass clazz, jlong ptr) {
     auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
     instance->wait_for_frame();
+}
+
+JNIEXPORT jboolean JNICALL FN(nHasPendingFrame)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->has_pending_frame();
 }
 
 JNIEXPORT jboolean JNICALL FN(nDestroy)(JNIEnv *env, jclass clazz, jlong ptr) {

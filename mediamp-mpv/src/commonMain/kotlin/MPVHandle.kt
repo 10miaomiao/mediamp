@@ -116,6 +116,10 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         nWaitForFrame(ptr)
     }
 
+    fun hasPendingFrame(): Boolean {
+        return nHasPendingFrame(ptr)
+    }
+
     /**
      * Stop this `mpv_context` instance, which will run into the unrecoverable state.
      *
@@ -209,6 +213,7 @@ private external fun nGetSwHeight(ptr: Long): Int
 private external fun nGetVideoWidth(ptr: Long): Int
 private external fun nGetVideoHeight(ptr: Long): Int
 private external fun nWaitForFrame(ptr: Long)
+private external fun nHasPendingFrame(ptr: Long): Boolean
 
 private external fun nDestroy(ptr: Long): Boolean
 private external fun nFinalize(ptr: Long)

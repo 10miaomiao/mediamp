@@ -103,6 +103,11 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                     if (!running) break
 
                     if (handle.renderSwFrame()) {
+                        // Skip intermediate frames: keep rendering until caught up
+                        while (handle.hasPendingFrame()) {
+                            handle.renderSwFrame()
+                        }
+
                         val neededSize = handle.getSwWidth() * handle.getSwHeight() * 4
                         if (pixelBuffer.size < neededSize) {
                             pixelBuffer = ByteArray(neededSize)

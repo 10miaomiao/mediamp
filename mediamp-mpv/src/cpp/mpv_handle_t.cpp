@@ -305,6 +305,12 @@ void mpv_handle_t::wait_for_frame() {
     frame_ready_ = false;
 }
 
+bool mpv_handle_t::has_pending_frame() {
+    if (!sw_render_ctx_) return false;
+    uint64_t flags = mpv_render_context_update(sw_render_ctx_);
+    return (flags & MPV_RENDER_UPDATE_FRAME) != 0;
+}
+
 bool mpv_handle_t::copy_sw_pixels(uint8_t *out, int out_size, int *out_width, int *out_height) {
     if (!sw_front_buffer_ || sw_width_ <= 0 || sw_height_ <= 0) return false;
     int size = sw_width_ * sw_height_ * 4;

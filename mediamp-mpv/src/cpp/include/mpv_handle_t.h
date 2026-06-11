@@ -49,6 +49,7 @@ public:
     int get_video_width() const;
     int get_video_height() const;
     void wait_for_frame();
+    bool has_pending_frame();
     bool copy_sw_pixels(uint8_t *out, int out_size, int *out_width, int *out_height);
 
 private:
