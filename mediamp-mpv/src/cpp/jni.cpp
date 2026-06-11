@@ -49,6 +49,9 @@ extern "C" {
     JNIEXPORT jboolean JNICALL FN(nCopySwPixels)(JNIEnv *env, jclass clazz, jlong ptr, jbyteArray outArray);
     JNIEXPORT jint JNICALL FN(nGetSwWidth)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT jint JNICALL FN(nGetSwHeight)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT jint JNICALL FN(nGetVideoWidth)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT jint JNICALL FN(nGetVideoHeight)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT void JNICALL FN(nWaitForFrame)(JNIEnv *env, jclass clazz, jlong ptr);
 
 /**
  * 关闭此 mpv_handle_t 实例
@@ -321,6 +324,21 @@ JNIEXPORT jint JNICALL FN(nGetSwWidth)(JNIEnv *env, jclass clazz, jlong ptr) {
 JNIEXPORT jint JNICALL FN(nGetSwHeight)(JNIEnv *env, jclass clazz, jlong ptr) {
     auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
     return instance->get_sw_height();
+}
+
+JNIEXPORT jint JNICALL FN(nGetVideoWidth)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->get_video_width();
+}
+
+JNIEXPORT jint JNICALL FN(nGetVideoHeight)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->get_video_height();
+}
+
+JNIEXPORT void JNICALL FN(nWaitForFrame)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    instance->wait_for_frame();
 }
 
 JNIEXPORT jboolean JNICALL FN(nDestroy)(JNIEnv *env, jclass clazz, jlong ptr) {

@@ -198,10 +198,15 @@ bool mpv_handle_t::create_sw_render_context(int width, int height) {
         return false;
     }
 
-    // Register update callback for frame notifications
+    // Register update callback for event-driven rendering
     mpv_render_context_set_update_callback(sw_render_ctx_, [](void *ctx) {
-        // Frame is ready, the render thread will pick it up
-    }, nullptr);
+        auto *self = static_cast<mpv_handle_t*>(ctx);
+        {
+            std::lock_guard<std::mutex> lock(self->frame_mutex_);
+            self->frame_ready_ = true;
+        }
+        self->frame_cv_.notify_one();
+    }, this);
 
     LOG("SW render context created: %dx%d", width, height);
     return true;
@@ -223,23 +228,22 @@ bool mpv_handle_t::render_sw_frame() {
 
     int result = mpv_render_context_render(sw_render_ctx_, params);
     if (result < 0) {
-        LOG("mpv_render_context_render (SW) failed: %d", result);
         return false;
     }
 
-    // Debug: check first few pixels
-    static int render_count = 0;
-    render_count++;
-    if (render_count <= 5 || render_count % 300 == 0) {
-        bool has_content = false;
-        int check_size = (sw_width_ * sw_height_ * 4 < 4000) ? sw_width_ * sw_height_ * 4 : 4000;
-        for (int i = 0; i < check_size; i++) {
-            if (sw_pixel_buffer_[i] != 0) { has_content = true; break; }
+    // Detect actual video resolution and resize buffer if needed
+    if (size[0] != sw_width_ || size[1] != sw_height_) {
+        int new_w = size[0];
+        int new_h = size[1];
+        if (new_w > 0 && new_h > 0) {
+            delete[] sw_pixel_buffer_;
+            sw_width_ = new_w;
+            sw_height_ = new_h;
+            sw_pixel_buffer_ = new uint8_t[new_w * new_h * 4];
         }
-        uint32_t first_pixel = *(uint32_t*)sw_pixel_buffer_;
-        LOG("SW render #%d: result=%d, first_pixel=0x%08X, has_content=%d, size=%dx%d",
-            render_count, result, first_pixel, has_content, sw_width_, sw_height_);
     }
+    video_width_ = size[0];
+    video_height_ = size[1];
 
     return true;
 }
@@ -255,6 +259,10 @@ void mpv_handle_t::destroy_sw_render_context() {
     }
     sw_width_ = 0;
     sw_height_ = 0;
+    video_width_ = 0;
+    video_height_ = 0;
+    // Wake up any thread blocked in wait_for_frame()
+    frame_cv_.notify_all();
 }
 
 const uint8_t *mpv_handle_t::get_sw_pixels() const {
@@ -267,6 +275,20 @@ int mpv_handle_t::get_sw_width() const {
 
 int mpv_handle_t::get_sw_height() const {
     return sw_height_;
+}
+
+int mpv_handle_t::get_video_width() const {
+    return video_width_;
+}
+
+int mpv_handle_t::get_video_height() const {
+    return video_height_;
+}
+
+void mpv_handle_t::wait_for_frame() {
+    std::unique_lock<std::mutex> lock(frame_mutex_);
+    frame_cv_.wait(lock, [this] { return frame_ready_ || !sw_render_ctx_; });
+    frame_ready_ = false;
 }
 
 bool mpv_handle_t::destroy(JNIEnv *env) {

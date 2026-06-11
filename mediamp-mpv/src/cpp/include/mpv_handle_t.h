@@ -7,6 +7,8 @@
 
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <condition_variable>
 #include <jni.h>
 #include <mpv/client.h>
 #include <mpv/render.h>
@@ -44,6 +46,9 @@ public:
     const uint8_t *get_sw_pixels() const;
     int get_sw_width() const;
     int get_sw_height() const;
+    int get_video_width() const;
+    int get_video_height() const;
+    void wait_for_frame();
 
 private:
     JavaVM *jvm_;
@@ -61,6 +66,13 @@ private:
     uint8_t *sw_pixel_buffer_ = nullptr;
     int sw_width_ = 0;
     int sw_height_ = 0;
+    int video_width_ = 0;
+    int video_height_ = 0;
+
+    // Event-driven rendering synchronization
+    std::mutex frame_mutex_;
+    std::condition_variable frame_cv_;
+    bool frame_ready_ = false;
 
     std::shared_ptr<mediampv::compatible_thread> event_thread_;
     bool event_loop_request_exit = false;

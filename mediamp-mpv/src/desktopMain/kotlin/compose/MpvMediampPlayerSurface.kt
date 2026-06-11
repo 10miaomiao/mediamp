@@ -91,20 +91,17 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
 
         renderThread = Thread({
             Thread.currentThread().name = "mpv-sw-render"
-            var frameCount = 0
             while (running) {
                 try {
+                    // Block until mpv signals a new frame is ready (event-driven, no polling)
+                    handle.waitForFrame()
+                    if (!running) break
+
                     if (handle.renderSwFrame()) {
-                        val w = handle.getSwWidth()
-                        val h = handle.getSwHeight()
+                        val w = handle.getVideoWidth()
+                        val h = handle.getVideoHeight()
 
                         if (w > 0 && h > 0) {
-                            frameCount++
-                            if (frameCount <= 3 || frameCount % 300 == 0) {
-                                val sampleEnd = minOf(4000, pixelBuffer.size)
-                                val hasContent = (0 until sampleEnd).any { pixelBuffer[it] != 0.toByte() }
-                                println("[MPV-SW] frame $frameCount: ${w}x${h}, hasContent=$hasContent")
-                            }
                             val neededSize = w * h * 4
                             if (pixelBuffer.size < neededSize) {
                                 pixelBuffer = ByteArray(neededSize)
@@ -120,9 +117,6 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                             }
                         }
                     }
-
-                    // ~60fps render loop
-                    Thread.sleep(16)
                 } catch (e: InterruptedException) {
                     break
                 } catch (e: Exception) {
