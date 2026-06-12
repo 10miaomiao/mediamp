@@ -20,6 +20,7 @@ public:
     ~render_context_t();
 
     bool isValid() const { return render_ctx_ != nullptr; }
+    mpv_render_context *getMpvRenderContext() const { return render_ctx_; }
 
     // Render a frame and read pixels into BGRA buffer
     // Returns true if a new frame was rendered

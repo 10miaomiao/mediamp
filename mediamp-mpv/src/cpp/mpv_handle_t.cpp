@@ -3,6 +3,7 @@
 #include "include/method_cache.h"
 #include "include/compatible_thread.h"
 #include "include/global_lock.h"
+#include <thread>
 #include <mpv/render.h>
 
 #if defined(__ANDROID__)
@@ -300,14 +301,38 @@ int mpv_handle_t::get_video_height() const {
 }
 
 void mpv_handle_t::wait_for_frame() {
-    std::unique_lock<std::mutex> lock(frame_mutex_);
-    frame_cv_.wait(lock, [this] { return frame_ready_ || !sw_render_ctx_; });
-    frame_ready_ = false;
+    // Hybrid: try condition variable first (fast path from callback),
+    // fall back to polling mpv_render_context_update() if callback doesn't fire.
+    while (sw_render_ctx_ || gl_render_ctx_) {
+        {
+            std::unique_lock<std::mutex> lock(frame_mutex_);
+            if (frame_cv_.wait_for(lock, std::chrono::milliseconds(2),
+                [this] { return frame_ready_ || (!sw_render_ctx_ && !gl_render_ctx_); })) {
+                frame_ready_ = false;
+                return;
+            }
+        }
+        // Callback didn't fire within 2ms, poll mpv directly
+        mpv_render_context *ctx = sw_render_ctx_;
+        if (!ctx && gl_render_ctx_) {
+            ctx = gl_render_ctx_->getMpvRenderContext();
+        }
+        if (ctx) {
+            uint64_t flags = mpv_render_context_update(ctx);
+            if (flags & MPV_RENDER_UPDATE_FRAME) {
+                return;
+            }
+        }
+    }
 }
 
 bool mpv_handle_t::has_pending_frame() {
-    if (!sw_render_ctx_) return false;
-    uint64_t flags = mpv_render_context_update(sw_render_ctx_);
+    mpv_render_context *ctx = sw_render_ctx_;
+    if (!ctx && gl_render_ctx_) {
+        ctx = gl_render_ctx_->getMpvRenderContext();
+    }
+    if (!ctx) return false;
+    uint64_t flags = mpv_render_context_update(ctx);
     return (flags & MPV_RENDER_UPDATE_FRAME) != 0;
 }
 
@@ -321,11 +346,70 @@ bool mpv_handle_t::copy_sw_pixels(uint8_t *out, int out_size, int *out_width, in
     return true;
 }
 
+// OpenGL render context (GPU-accelerated)
+
+bool mpv_handle_t::create_gl_render_context(int width, int height) {
+    FP;
+    CHECK_HANDLE()
+
+    if (gl_render_ctx_) {
+        destroy_gl_render_context();
+    }
+
+    gl_render_ctx_ = new render_context_t(handle_, width, height);
+    if (!gl_render_ctx_->isValid()) {
+        LOG("Failed to create GL render context");
+        delete gl_render_ctx_;
+        gl_render_ctx_ = nullptr;
+        return false;
+    }
+
+    LOG("GL render context created: %dx%d", width, height);
+    return true;
+}
+
+bool mpv_handle_t::render_gl_frame() {
+    if (!gl_render_ctx_) return false;
+    return gl_render_ctx_->render();
+}
+
+void mpv_handle_t::destroy_gl_render_context() {
+    if (gl_render_ctx_) {
+        delete gl_render_ctx_;
+        gl_render_ctx_ = nullptr;
+    }
+    // Wake up any thread blocked in wait_for_frame()
+    frame_cv_.notify_all();
+}
+
+bool mpv_handle_t::copy_gl_pixels(uint8_t *out, int out_size, int *out_width, int *out_height) {
+    if (!gl_render_ctx_) return false;
+    int w = gl_render_ctx_->getWidth();
+    int h = gl_render_ctx_->getHeight();
+    int size = w * h * 4;
+    if (out_size < size) return false;
+    const uint8_t *pixels = gl_render_ctx_->getPixelBuffer();
+    if (!pixels) return false;
+    memcpy(out, pixels, size);
+    *out_width = w;
+    *out_height = h;
+    return true;
+}
+
+int mpv_handle_t::get_gl_width() const {
+    return gl_render_ctx_ ? gl_render_ctx_->getWidth() : 0;
+}
+
+int mpv_handle_t::get_gl_height() const {
+    return gl_render_ctx_ ? gl_render_ctx_->getHeight() : 0;
+}
+
 bool mpv_handle_t::destroy(JNIEnv *env) {
     FP;
     CHECK_HANDLE()
 
-    // Destroy SW render context before mpv handle
+    // Destroy render contexts before mpv handle
+    destroy_gl_render_context();
     destroy_sw_render_context();
 
     event_loop_request_exit = true;

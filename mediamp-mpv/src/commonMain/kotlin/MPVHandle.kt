@@ -120,6 +120,32 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         return nHasPendingFrame(ptr)
     }
 
+    // OpenGL render context (GPU-accelerated)
+
+    fun createGlRenderContext(width: Int, height: Int): Boolean {
+        return nCreateGlRenderContext(ptr, width, height)
+    }
+
+    fun renderGlFrame(): Boolean {
+        return nRenderGlFrame(ptr)
+    }
+
+    fun destroyGlRenderContext() {
+        nDestroyGlRenderContext(ptr)
+    }
+
+    fun copyGlPixels(outArray: ByteArray, outSize: IntArray): Boolean {
+        return nCopyGlPixels(ptr, outArray, outSize)
+    }
+
+    fun getGlWidth(): Int {
+        return nGetGlWidth(ptr)
+    }
+
+    fun getGlHeight(): Int {
+        return nGetGlHeight(ptr)
+    }
+
     /**
      * Stop this `mpv_context` instance, which will run into the unrecoverable state.
      *
@@ -214,6 +240,14 @@ private external fun nGetVideoWidth(ptr: Long): Int
 private external fun nGetVideoHeight(ptr: Long): Int
 private external fun nWaitForFrame(ptr: Long)
 private external fun nHasPendingFrame(ptr: Long): Boolean
+
+// OpenGL render context native methods (GPU-accelerated)
+private external fun nCreateGlRenderContext(ptr: Long, width: Int, height: Int): Boolean
+private external fun nRenderGlFrame(ptr: Long): Boolean
+private external fun nDestroyGlRenderContext(ptr: Long)
+private external fun nCopyGlPixels(ptr: Long, outArray: ByteArray, outSize: IntArray): Boolean
+private external fun nGetGlWidth(ptr: Long): Int
+private external fun nGetGlHeight(ptr: Long): Int
 
 private external fun nDestroy(ptr: Long): Boolean
 private external fun nFinalize(ptr: Long)

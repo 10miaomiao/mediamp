@@ -15,8 +15,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.util.fastCoerceAtLeast
 import org.jetbrains.skia.Bitmap
-import org.jetbrains.skia.ColorAlphaType
-import org.jetbrains.skia.ColorType
 import org.jetbrains.skia.ImageInfo
 import org.openani.mediamp.InternalMediampApi
 import org.openani.mediamp.mpv.MpvMediampPlayer
@@ -24,12 +22,6 @@ import javax.swing.SwingUtilities
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/**
- * Composable that renders MPV video frames on desktop.
- *
- * Uses vo=libmpv with software render context (MPV_RENDER_PARAM_SW_*).
- * mpv writes pixels directly to a CPU buffer, no OpenGL needed.
- */
 @OptIn(InternalMediampApi::class)
 @Composable
 public fun MpvMediampPlayerSurface(
@@ -78,13 +70,12 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
     private val skiaBitmap = Bitmap()
     @Volatile
     private var pixelBuffer = ByteArray(RENDER_WIDTH * RENDER_HEIGHT * 4)
-    private val sizeOut = IntArray(2) // [width, height] from native
+    private val sizeOut = IntArray(2)
 
     private var renderThread: Thread? = null
     @Volatile
     private var running = false
 
-    // Track bitmap dimensions to avoid redundant allocPixels
     private var bitmapW = 0
     private var bitmapH = 0
 
@@ -96,19 +87,19 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
 
         renderThread = Thread({
             Thread.currentThread().name = "mpv-sw-render"
+            var frameCount = 0
+            var lastFpsTime = System.nanoTime()
             while (running) {
                 try {
-                    // Block until mpv signals a new frame is ready (event-driven, no polling)
                     handle.waitForFrame()
                     if (!running) break
 
+                    val t0 = System.nanoTime()
                     if (handle.renderSwFrame()) {
-                        // Skip intermediate frames: keep rendering until caught up
-                        while (handle.hasPendingFrame()) {
-                            handle.renderSwFrame()
-                        }
+                        val renderMs = (System.nanoTime() - t0) / 1_000_000
 
                         val neededSize = handle.getSwWidth() * handle.getSwHeight() * 4
+                        if (neededSize <= 0) continue
                         if (pixelBuffer.size < neededSize) {
                             pixelBuffer = ByteArray(neededSize)
                         }
@@ -116,16 +107,23 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                             val w = sizeOut[0]
                             val h = sizeOut[1]
                             if (w > 0 && h > 0) {
+                                frameCount++
+                                val now = System.nanoTime()
+                                val elapsed = now - lastFpsTime
+                                if (elapsed >= 5_000_000_000L) { // every 5 seconds
+                                    val fps = frameCount * 1_000_000_000.0 / elapsed
+                                    println("[Render] SW FPS: ${"%.1f".format(fps)}, frames=$frameCount, last render=${renderMs}ms")
+                                    frameCount = 0
+                                    lastFpsTime = now
+                                }
                                 val buf = pixelBuffer
                                 SwingUtilities.invokeLater {
                                     if (w != bitmapW || h != bitmapH) {
                                         bitmapW = w
                                         bitmapH = h
-                                        val imageInfo = ImageInfo.makeN32Premul(w, h)
-                                        skiaBitmap.allocPixels(imageInfo)
+                                        skiaBitmap.allocPixels(ImageInfo.makeN32Premul(w, h))
                                     }
-                                    val imageInfo = ImageInfo.makeN32Premul(w, h)
-                                    skiaBitmap.installPixels(imageInfo, buf, w * 4)
+                                    skiaBitmap.installPixels(ImageInfo.makeN32Premul(w, h), buf, w * 4)
                                     bitmapState.value = skiaBitmap.asComposeImageBitmap()
                                 }
                             }
@@ -148,7 +146,6 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
         running = false
         renderThread?.interrupt()
         renderThread = null
-        // SW render context is destroyed in mpv_handle_t::destroy()
     }
 
     companion object {

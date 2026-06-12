@@ -54,6 +54,14 @@ extern "C" {
     JNIEXPORT void JNICALL FN(nWaitForFrame)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT jboolean JNICALL FN(nHasPendingFrame)(JNIEnv *env, jclass clazz, jlong ptr);
 
+    // OpenGL render context (GPU-accelerated)
+    JNIEXPORT jboolean JNICALL FN(nCreateGlRenderContext)(JNIEnv *env, jclass clazz, jlong ptr, jint width, jint height);
+    JNIEXPORT jboolean JNICALL FN(nRenderGlFrame)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT void JNICALL FN(nDestroyGlRenderContext)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT jboolean JNICALL FN(nCopyGlPixels)(JNIEnv *env, jclass clazz, jlong ptr, jbyteArray outArray, jintArray outSize);
+    JNIEXPORT jint JNICALL FN(nGetGlWidth)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT jint JNICALL FN(nGetGlHeight)(JNIEnv *env, jclass clazz, jlong ptr);
+
 /**
  * 关闭此 mpv_handle_t 实例
  */
@@ -346,6 +354,50 @@ JNIEXPORT void JNICALL FN(nWaitForFrame)(JNIEnv *env, jclass clazz, jlong ptr) {
 JNIEXPORT jboolean JNICALL FN(nHasPendingFrame)(JNIEnv *env, jclass clazz, jlong ptr) {
     auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
     return instance->has_pending_frame();
+}
+
+// OpenGL render context JNI implementations
+
+JNIEXPORT jboolean JNICALL FN(nCreateGlRenderContext)(JNIEnv *env, jclass clazz, jlong ptr, jint width, jint height) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->create_gl_render_context(width, height);
+}
+
+JNIEXPORT jboolean JNICALL FN(nRenderGlFrame)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->render_gl_frame();
+}
+
+JNIEXPORT void JNICALL FN(nDestroyGlRenderContext)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    instance->destroy_gl_render_context();
+}
+
+JNIEXPORT jboolean JNICALL FN(nCopyGlPixels)(JNIEnv *env, jclass clazz, jlong ptr, jbyteArray outArray, jintArray outSize) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+
+    jsize arrayLen = env->GetArrayLength(outArray);
+    int out_w = 0, out_h = 0;
+
+    jbyte *dst = env->GetByteArrayElements(outArray, nullptr);
+    bool ok = instance->copy_gl_pixels(reinterpret_cast<uint8_t*>(dst), arrayLen, &out_w, &out_h);
+    env->ReleaseByteArrayElements(outArray, dst, ok ? 0 : JNI_ABORT);
+
+    if (ok) {
+        jint size[2] = {out_w, out_h};
+        env->SetIntArrayRegion(outSize, 0, 2, size);
+    }
+    return ok;
+}
+
+JNIEXPORT jint JNICALL FN(nGetGlWidth)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->get_gl_width();
+}
+
+JNIEXPORT jint JNICALL FN(nGetGlHeight)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->get_gl_height();
 }
 
 JNIEXPORT jboolean JNICALL FN(nDestroy)(JNIEnv *env, jclass clazz, jlong ptr) {

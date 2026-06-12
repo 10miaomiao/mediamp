@@ -11,7 +11,7 @@
 #define LOG_TAG "mediampv"
 #if (defined(__APPLE__) && defined(__MACH__)) || (defined(__linux__) && !defined(__ANDROID__)) || (defined(_WIN32) || defined(_WIN64))
 #include <cstdio>
-#define LOG(...) printf(__VA_ARGS__)
+#define LOG(...) do { printf(__VA_ARGS__); printf("\n"); fflush(stdout); } while(0)
 #else
 #include <android/log.h>
 #define LOG(...) __android_log_print(ANDROID_LOG_VERBOSE, LOG_TAG, __VA_ARGS__)

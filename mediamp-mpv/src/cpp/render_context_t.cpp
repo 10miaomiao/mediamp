@@ -29,6 +29,8 @@
     #define GL_RGBA8                          0x8058
     #define GL_BGRA                           0x80E1
     #define GL_FRAMEBUFFER_COMPLETE           0x8CD5
+    #define GL_RGBA16F                        0x881A
+    #define GL_HALF_FLOAT                     0x140B
 #elif defined(__APPLE__)
     #include <OpenGL/gl.h>
     #include <OpenGL/CGLTypes.h>
@@ -92,7 +94,7 @@ struct PlatformGLData {
     HINSTANCE opengl32 = nullptr;
 };
 
-static bool loadWGLExtensions(HDC hdc) {
+static bool loadWGLExtensions(HDC hdc, HGLRC &out_context) {
     // We need a temporary context to load wglCreateContextAttribsARB
     HGLRC tempCtx = wglCreateContext(hdc);
     if (!tempCtx) return false;
@@ -108,8 +110,8 @@ static bool loadWGLExtensions(HDC hdc) {
     }
 
     int attribs[] = {
-        WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
-        WGL_CONTEXT_MINOR_VERSION_ARB, 3,
+        WGL_CONTEXT_MAJOR_VERSION_ARB, 4,
+        WGL_CONTEXT_MINOR_VERSION_ARB, 5,
         WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
         0
     };
@@ -121,7 +123,7 @@ static bool loadWGLExtensions(HDC hdc) {
     if (!coreCtx) return false;
 
     wglMakeCurrent(hdc, coreCtx);
-    // Store the core context for later use
+    out_context = coreCtx;
     return true;
 }
 
@@ -307,6 +309,7 @@ bool render_context_t::initOpenGL() {
     SetPixelFormat(data->hdc, format, &pfd);
 
     // Create OpenGL context
+    data->opengl32 = LoadLibraryA("opengl32.dll");
     data->hglrc = wglCreateContext(data->hdc);
     if (!data->hglrc) {
         ReleaseDC(data->hwnd, data->hdc);
@@ -314,11 +317,9 @@ bool render_context_t::initOpenGL() {
         delete data;
         return false;
     }
-
     wglMakeCurrent(data->hdc, data->hglrc);
 
     // Load GL extension functions
-    data->opengl32 = LoadLibraryA("opengl32.dll");
     loadGLFunctions();
 
     gl_context_ = data;
@@ -417,16 +418,15 @@ bool render_context_t::initOpenGLWithExistingHwnd(void *hwnd) {
     int format = ChoosePixelFormat(data->hdc, &pfd);
     SetPixelFormat(data->hdc, format, &pfd);
 
-    // 创建新的 OpenGL 上下文（与 vo=gpu 的上下文共享资源）
+    // 创建 OpenGL 上下文
+    data->opengl32 = LoadLibraryA("opengl32.dll");
     data->hglrc = wglCreateContext(data->hdc);
     if (!data->hglrc) {
         delete data;
         return false;
     }
-
     wglMakeCurrent(data->hdc, data->hglrc);
 
-    data->opengl32 = LoadLibraryA("opengl32.dll");
     loadGLFunctions();
 
     gl_context_ = data;
@@ -469,7 +469,7 @@ bool render_context_t::createFramebuffer() {
 
     glGenTextures(1, &texture_);
     glBindTexture(GL_TEXTURE_2D, texture_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width_, height_, 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture_, 0);
@@ -525,7 +525,7 @@ bool render_context_t::render() {
         .fbo = static_cast<int>(fbo_),
         .w = width_,
         .h = height_,
-        .internal_format = GL_RGBA8,
+        .internal_format = 0,  // let mpv choose the format
     };
 
     int flip_y = 1;
