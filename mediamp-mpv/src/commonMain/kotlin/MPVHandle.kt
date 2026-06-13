@@ -96,6 +96,29 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         return nRenderSwFrame(ptr)
     }
 
+    /**
+     * Allocate a native DirectByteBuffer for SW rendering.
+     * Returns the DirectByteBuffer object (JVM: java.nio.ByteBuffer).
+     */
+    fun createSwRenderBuffer(size: Int): Any {
+        return nCreateSwRenderBuffer(size)
+    }
+
+    /**
+     * mpv renders directly into [buffer] (a DirectByteBuffer from [createSwRenderBuffer]).
+     * outSize must be IntArray(2) to receive [width, height].
+     */
+    fun renderSwFrameToBuffer(buffer: Any, bufSize: Int, outSize: IntArray): Boolean {
+        return nRenderSwFrameToBuffer(ptr, buffer, bufSize, outSize)
+    }
+
+    /**
+     * Free the native memory backing [buffer].
+     */
+    fun destroySwRenderBuffer(buffer: Any) {
+        nDestroySwRenderBuffer(buffer)
+    }
+
     fun destroySwRenderContext() {
         nDestroySwRenderContext(ptr)
     }
@@ -280,6 +303,9 @@ internal expect fun detachSurface(ptr: Long): Boolean
 private external fun nCreateSwRenderContext(ptr: Long, width: Int, height: Int): Boolean
 private external fun nResizeSwRenderContext(ptr: Long, width: Int, height: Int): Boolean
 private external fun nRenderSwFrame(ptr: Long): Boolean
+private external fun nCreateSwRenderBuffer(size: Int): Any
+private external fun nDestroySwRenderBuffer(buffer: Any)
+private external fun nRenderSwFrameToBuffer(ptr: Long, buffer: Any, bufSize: Int, outSize: IntArray): Boolean
 private external fun nDestroySwRenderContext(ptr: Long)
 private external fun nCopySwPixels(ptr: Long, outArray: ByteArray, outSize: IntArray): Boolean
 private external fun nGetSwWidth(ptr: Long): Int

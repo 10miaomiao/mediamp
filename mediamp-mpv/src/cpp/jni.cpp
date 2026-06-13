@@ -47,6 +47,9 @@ extern "C" {
     JNIEXPORT jboolean JNICALL FN(nCreateSwRenderContext)(JNIEnv *env, jclass clazz, jlong ptr, jint width, jint height);
     JNIEXPORT jboolean JNICALL FN(nResizeSwRenderContext)(JNIEnv *env, jclass clazz, jlong ptr, jint width, jint height);
     JNIEXPORT jboolean JNICALL FN(nRenderSwFrame)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT jobject JNICALL FN(nCreateSwRenderBuffer)(JNIEnv *env, jclass clazz, jint size);
+    JNIEXPORT void JNICALL FN(nDestroySwRenderBuffer)(JNIEnv *env, jclass clazz, jobject buffer);
+    JNIEXPORT jboolean JNICALL FN(nRenderSwFrameToBuffer)(JNIEnv *env, jclass clazz, jlong ptr, jobject buffer, jint bufSize, jintArray outSize);
     JNIEXPORT void JNICALL FN(nDestroySwRenderContext)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT jboolean JNICALL FN(nCopySwPixels)(JNIEnv *env, jclass clazz, jlong ptr, jbyteArray outArray, jintArray outSize);
     JNIEXPORT jint JNICALL FN(nGetSwWidth)(JNIEnv *env, jclass clazz, jlong ptr);
@@ -332,6 +335,34 @@ JNIEXPORT jboolean JNICALL FN(nResizeSwRenderContext)(JNIEnv *env, jclass clazz,
 JNIEXPORT jboolean JNICALL FN(nRenderSwFrame)(JNIEnv *env, jclass clazz, jlong ptr) {
     auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
     return instance->render_sw_frame();
+}
+
+JNIEXPORT jobject JNICALL FN(nCreateSwRenderBuffer)(JNIEnv *env, jclass clazz, jint size) {
+    auto *buf = static_cast<uint8_t*>(malloc(size));
+    if (!buf) return nullptr;
+    memset(buf, 0, size);
+    return env->NewDirectByteBuffer(buf, size);
+}
+
+JNIEXPORT void JNICALL FN(nDestroySwRenderBuffer)(JNIEnv *env, jclass clazz, jobject buffer) {
+    if (!buffer) return;
+    auto *addr = env->GetDirectBufferAddress(buffer);
+    if (addr) free(addr);
+}
+
+JNIEXPORT jboolean JNICALL FN(nRenderSwFrameToBuffer)(JNIEnv *env, jclass clazz, jlong ptr, jobject buffer, jint bufSize, jintArray outSize) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+
+    auto *buf = static_cast<uint8_t*>(env->GetDirectBufferAddress(buffer));
+    if (!buf) return false;
+
+    int out_w = 0, out_h = 0;
+    bool ok = instance->render_sw_frame_to_direct(buf, (int)bufSize, &out_w, &out_h);
+    if (ok) {
+        jint size[2] = {out_w, out_h};
+        env->SetIntArrayRegion(outSize, 0, 2, size);
+    }
+    return ok;
 }
 
 JNIEXPORT void JNICALL FN(nDestroySwRenderContext)(JNIEnv *env, jclass clazz, jlong ptr) {

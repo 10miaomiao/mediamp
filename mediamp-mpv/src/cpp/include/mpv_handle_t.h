@@ -56,6 +56,9 @@ public:
     bool has_pending_frame();
     bool copy_sw_pixels(uint8_t *out, int out_size, int *out_width, int *out_height);
 
+    // DirectByteBuffer render: mpv renders directly to a Java DirectByteBuffer
+    bool render_sw_frame_to_direct(uint8_t *direct_ptr, int buf_size, int *out_w, int *out_h);
+
     // OpenGL render context (GPU-accelerated via WGL)
     bool create_gl_render_context(int width, int height);
     bool render_gl_frame();

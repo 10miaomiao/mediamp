@@ -425,6 +425,33 @@ bool mpv_handle_t::copy_sw_pixels(uint8_t *out, int out_size, int *out_width, in
     return true;
 }
 
+bool mpv_handle_t::render_sw_frame_to_direct(uint8_t *direct_ptr, int buf_size, int *out_w, int *out_h) {
+    if (!sw_render_ctx_ || !direct_ptr) return false;
+
+    int w = sw_width_;
+    int h = sw_height_;
+    int needed = w * h * 4;
+    if (w <= 0 || h <= 0 || buf_size < needed) return false;
+
+    int32_t size[] = {w, h};
+    int pitch = 4 * w;
+
+    mpv_render_param params[] = {
+        {MPV_RENDER_PARAM_SW_SIZE, size},
+        {MPV_RENDER_PARAM_SW_FORMAT, const_cast<char*>("bgra")},
+        {MPV_RENDER_PARAM_SW_STRIDE, &pitch},
+        {MPV_RENDER_PARAM_SW_POINTER, direct_ptr},
+        {MPV_RENDER_PARAM_INVALID, nullptr},
+    };
+
+    int result = mpv_render_context_render(sw_render_ctx_, params);
+    if (result < 0) return false;
+
+    *out_w = w;
+    *out_h = h;
+    return true;
+}
+
 // OpenGL render context (GPU-accelerated)
 
 bool mpv_handle_t::create_gl_render_context(int width, int height) {
