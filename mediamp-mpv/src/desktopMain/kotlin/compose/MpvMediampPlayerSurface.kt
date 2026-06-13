@@ -67,7 +67,6 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
     var bitmapState = mutableStateOf<ImageBitmap?>(null)
         private set
 
-    private val skiaBitmap = Bitmap()
     @Volatile
     private var pixelBuffer = ByteArray(RENDER_WIDTH * RENDER_HEIGHT * 4)
     private val sizeOut = IntArray(2)
@@ -76,8 +75,11 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
     @Volatile
     private var running = false
 
-    private var bitmapW = 0
-    private var bitmapH = 0
+    // Dynamic resolution tracking
+    private var currentRenderW = RENDER_WIDTH
+    private var currentRenderH = RENDER_HEIGHT
+    private var resolutionChecked = false
+    private val resolutionOut = IntArray(2)
 
     fun start() {
         if (running) return
@@ -87,16 +89,41 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
 
         renderThread = Thread({
             Thread.currentThread().name = "mpv-sw-render"
-            var frameCount = 0
-            var lastFpsTime = System.nanoTime()
+            var renderedFrames = 0L
+            var skippedFrames = 0L
+            var lastStatTime = System.nanoTime()
+            var lastRenderMs = 0L
+            var framesSinceResizeCheck = 0
             while (running) {
                 try {
                     handle.waitForFrame()
                     if (!running) break
 
+                    // Periodically check video resolution and resize if needed
+                    framesSinceResizeCheck++
+                    if (!resolutionChecked || framesSinceResizeCheck >= 30) {
+                        framesSinceResizeCheck = 0
+                        if (handle.queryVideoResolution(resolutionOut)) {
+                            val vw = resolutionOut[0]
+                            val vh = resolutionOut[1]
+                            if (vw > 0 && vh > 0) {
+                                val targetW = minOf(vw, 1920)
+                                val targetH = minOf(vh, 1080)
+                                if (targetW != currentRenderW || targetH != currentRenderH) {
+                                    println("[Render] Resizing SW context: ${currentRenderW}x${currentRenderH} -> ${targetW}x${targetH}")
+                                    handle.resizeSwRenderContext(targetW, targetH)
+                                    currentRenderW = targetW
+                                    currentRenderH = targetH
+                                }
+                                resolutionChecked = true
+                            }
+                        }
+                    }
+
                     val t0 = System.nanoTime()
                     if (handle.renderSwFrame()) {
-                        val renderMs = (System.nanoTime() - t0) / 1_000_000
+                        lastRenderMs = (System.nanoTime() - t0) / 1_000_000
+                        renderedFrames++
 
                         val neededSize = handle.getSwWidth() * handle.getSwHeight() * 4
                         if (neededSize <= 0) continue
@@ -107,27 +134,29 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                             val w = sizeOut[0]
                             val h = sizeOut[1]
                             if (w > 0 && h > 0) {
-                                frameCount++
-                                val now = System.nanoTime()
-                                val elapsed = now - lastFpsTime
-                                if (elapsed >= 5_000_000_000L) { // every 5 seconds
-                                    val fps = frameCount * 1_000_000_000.0 / elapsed
-                                    println("[Render] SW FPS: ${"%.1f".format(fps)}, frames=$frameCount, last render=${renderMs}ms")
-                                    frameCount = 0
-                                    lastFpsTime = now
-                                }
                                 val buf = pixelBuffer
                                 SwingUtilities.invokeLater {
-                                    if (w != bitmapW || h != bitmapH) {
-                                        bitmapW = w
-                                        bitmapH = h
-                                        skiaBitmap.allocPixels(ImageInfo.makeN32Premul(w, h))
-                                    }
-                                    skiaBitmap.installPixels(ImageInfo.makeN32Premul(w, h), buf, w * 4)
-                                    bitmapState.value = skiaBitmap.asComposeImageBitmap()
+                                    // Create a new Bitmap each frame to ensure Compose detects the change
+                                    val bmp = Bitmap()
+                                    bmp.allocPixels(ImageInfo.makeN32Premul(w, h))
+                                    bmp.installPixels(ImageInfo.makeN32Premul(w, h), buf, w * 4)
+                                    bitmapState.value = bmp.asComposeImageBitmap()
                                 }
                             }
                         }
+                    } else {
+                        skippedFrames++
+                    }
+
+                    val now = System.nanoTime()
+                    val elapsed = now - lastStatTime
+                    if (elapsed >= 5_000_000_000L) {
+                        val totalFrames = renderedFrames + skippedFrames
+                        val fps = renderedFrames * 1_000_000_000.0 / elapsed
+                        println("[Render] SW FPS: ${"%.1f".format(fps)}, rendered=$renderedFrames, skipped=$skippedFrames, total=$totalFrames, render=${currentRenderW}x${currentRenderH}, last render=${lastRenderMs}ms")
+                        renderedFrames = 0
+                        skippedFrames = 0
+                        lastStatTime = now
                     }
                 } catch (e: InterruptedException) {
                     break

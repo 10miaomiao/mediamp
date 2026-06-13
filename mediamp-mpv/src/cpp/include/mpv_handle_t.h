@@ -42,6 +42,7 @@ public:
 
     // Software render context (vo=libmpv)
     bool create_sw_render_context(int width, int height);
+    bool resize_sw_render_context(int width, int height);
     bool render_sw_frame();
     void destroy_sw_render_context();
     const uint8_t *get_sw_pixels() const;
@@ -49,6 +50,7 @@ public:
     int get_sw_height() const;
     int get_video_width() const;
     int get_video_height() const;
+    bool query_video_resolution(int *out_w, int *out_h);
     void wait_for_frame();
     bool has_pending_frame();
     bool copy_sw_pixels(uint8_t *out, int out_size, int *out_width, int *out_height);
@@ -88,6 +90,10 @@ private:
     std::mutex frame_mutex_;
     std::condition_variable frame_cv_;
     bool frame_ready_ = false;
+
+    // Protects sw_pixel_buffer_ / sw_front_buffer_ / sw_width_ / sw_height_
+    // during resize (event thread) and render/copy (render thread)
+    std::mutex resize_mutex_;
 
     std::shared_ptr<mediampv::compatible_thread> event_thread_;
     bool event_loop_request_exit = false;

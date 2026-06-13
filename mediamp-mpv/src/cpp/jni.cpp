@@ -44,6 +44,7 @@ extern "C" {
 
     // Software render context (vo=libmpv)
     JNIEXPORT jboolean JNICALL FN(nCreateSwRenderContext)(JNIEnv *env, jclass clazz, jlong ptr, jint width, jint height);
+    JNIEXPORT jboolean JNICALL FN(nResizeSwRenderContext)(JNIEnv *env, jclass clazz, jlong ptr, jint width, jint height);
     JNIEXPORT jboolean JNICALL FN(nRenderSwFrame)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT void JNICALL FN(nDestroySwRenderContext)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT jboolean JNICALL FN(nCopySwPixels)(JNIEnv *env, jclass clazz, jlong ptr, jbyteArray outArray, jintArray outSize);
@@ -51,6 +52,7 @@ extern "C" {
     JNIEXPORT jint JNICALL FN(nGetSwHeight)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT jint JNICALL FN(nGetVideoWidth)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT jint JNICALL FN(nGetVideoHeight)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT jboolean JNICALL FN(nQueryVideoResolution)(JNIEnv *env, jclass clazz, jlong ptr, jintArray outSize);
     JNIEXPORT void JNICALL FN(nWaitForFrame)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT jboolean JNICALL FN(nHasPendingFrame)(JNIEnv *env, jclass clazz, jlong ptr);
 
@@ -136,12 +138,12 @@ JNIEXPORT jint JNICALL FN(nGetPropertyInt)(JNIEnv *env, jclass clazz, jlong ptr,
     auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
 
     const char *key_char = env->GetStringUTFChars(key, nullptr);
-    int result = 0;
+    int64_t result = 0;
 
     instance->get_property(key_char, MPV_FORMAT_INT64, &result);
     env->ReleaseStringUTFChars(key, key_char);
 
-    return result;
+    return static_cast<jint>(result);
 }
 
 JNIEXPORT jdouble JNICALL FN(nGetPropertyDouble)(JNIEnv *env, jclass clazz, jlong ptr, jstring key) {
@@ -299,6 +301,11 @@ JNIEXPORT jboolean JNICALL FN(nCreateSwRenderContext)(JNIEnv *env, jclass clazz,
     return instance->create_sw_render_context(width, height);
 }
 
+JNIEXPORT jboolean JNICALL FN(nResizeSwRenderContext)(JNIEnv *env, jclass clazz, jlong ptr, jint width, jint height) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->resize_sw_render_context(width, height);
+}
+
 JNIEXPORT jboolean JNICALL FN(nRenderSwFrame)(JNIEnv *env, jclass clazz, jlong ptr) {
     auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
     return instance->render_sw_frame();
@@ -344,6 +351,17 @@ JNIEXPORT jint JNICALL FN(nGetVideoWidth)(JNIEnv *env, jclass clazz, jlong ptr) 
 JNIEXPORT jint JNICALL FN(nGetVideoHeight)(JNIEnv *env, jclass clazz, jlong ptr) {
     auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
     return instance->get_video_height();
+}
+
+JNIEXPORT jboolean JNICALL FN(nQueryVideoResolution)(JNIEnv *env, jclass clazz, jlong ptr, jintArray outSize) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    int w = 0, h = 0;
+    bool ok = instance->query_video_resolution(&w, &h);
+    if (ok) {
+        jint size[2] = {w, h};
+        env->SetIntArrayRegion(outSize, 0, 2, size);
+    }
+    return ok;
 }
 
 JNIEXPORT void JNICALL FN(nWaitForFrame)(JNIEnv *env, jclass clazz, jlong ptr) {

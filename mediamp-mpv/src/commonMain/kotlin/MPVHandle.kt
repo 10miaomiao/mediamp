@@ -84,6 +84,10 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         return nCreateSwRenderContext(ptr, width, height)
     }
 
+    fun resizeSwRenderContext(width: Int, height: Int): Boolean {
+        return nResizeSwRenderContext(ptr, width, height)
+    }
+
     fun renderSwFrame(): Boolean {
         return nRenderSwFrame(ptr)
     }
@@ -110,6 +114,10 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
 
     fun getVideoHeight(): Int {
         return nGetVideoHeight(ptr)
+    }
+
+    fun queryVideoResolution(outSize: IntArray): Boolean {
+        return nQueryVideoResolution(ptr, outSize)
     }
 
     fun waitForFrame() {
@@ -231,6 +239,7 @@ internal expect fun detachSurface(ptr: Long): Boolean
 
 // Software render context native methods (vo=libmpv)
 private external fun nCreateSwRenderContext(ptr: Long, width: Int, height: Int): Boolean
+private external fun nResizeSwRenderContext(ptr: Long, width: Int, height: Int): Boolean
 private external fun nRenderSwFrame(ptr: Long): Boolean
 private external fun nDestroySwRenderContext(ptr: Long)
 private external fun nCopySwPixels(ptr: Long, outArray: ByteArray, outSize: IntArray): Boolean
@@ -238,6 +247,7 @@ private external fun nGetSwWidth(ptr: Long): Int
 private external fun nGetSwHeight(ptr: Long): Int
 private external fun nGetVideoWidth(ptr: Long): Int
 private external fun nGetVideoHeight(ptr: Long): Int
+private external fun nQueryVideoResolution(ptr: Long, outSize: IntArray): Boolean
 private external fun nWaitForFrame(ptr: Long)
 private external fun nHasPendingFrame(ptr: Long): Boolean
 

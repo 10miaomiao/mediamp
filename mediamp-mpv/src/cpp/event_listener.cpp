@@ -9,33 +9,41 @@ static void emit_property_change(JNIEnv *env, mpv_event_property *prop, jobject 
     
     switch (prop->format) {
         case MPV_FORMAT_NONE:
-            env->CallVoidMethod(*event_listener, 
-                                jni_mediamp_method_EventListener_onPropertyChange_NONE, 
+            env->CallVoidMethod(*event_listener,
+                                jni_mediamp_method_EventListener_onPropertyChange_NONE,
                                 prop_name);
             break;
         case MPV_FORMAT_FLAG:
-            env->CallVoidMethod(*event_listener, 
-                                jni_mediamp_method_EventListener_onPropertyChange_FLAG, 
+            env->CallVoidMethod(*event_listener,
+                                jni_mediamp_method_EventListener_onPropertyChange_FLAG,
                                 prop_name,
-                                (jboolean) (*(int *) prop->data != 0));
+                                prop->data ? (jboolean) (*(int *) prop->data != 0) : JNI_FALSE);
             break;
-        case MPV_FORMAT_INT64:
-            env->CallVoidMethod(*event_listener, 
-                                jni_mediamp_method_EventListener_onPropertyChange_INT64, 
-                                prop_name,
-                               (jlong) *(int64_t *) prop->data);
+        case MPV_FORMAT_INT64: {
+            jlong val = prop->data ? (jlong) *(int64_t *) prop->data : 0L;
+            env->CallVoidMethod(*event_listener,
+                                jni_mediamp_method_EventListener_onPropertyChange_INT64,
+                                prop_name, val);
+            if (env->ExceptionCheck()) {
+                LOG("emit_property_change: Exception in INT64 callback for %s", prop->name);
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+            }
             break;
+        }
         case MPV_FORMAT_DOUBLE:
-            env->CallVoidMethod(*event_listener, 
-                                jni_mediamp_method_EventListener_onPropertyChange_DOUBLE, 
+            env->CallVoidMethod(*event_listener,
+                                jni_mediamp_method_EventListener_onPropertyChange_DOUBLE,
                                 prop_name,
-                                (jdouble) *(double *) prop->data);
+                                prop->data ? (jdouble) *(double *) prop->data : 0.0);
             break;
         case MPV_FORMAT_STRING:
-            value = env->NewStringUTF(*(const char **) prop->data);
-            env->CallVoidMethod(*event_listener, 
-                                jni_mediamp_method_EventListener_onPropertyChange_STRING, 
-                                prop_name, 
+            if (prop->data && *(const char **) prop->data) {
+                value = env->NewStringUTF(*(const char **) prop->data);
+            }
+            env->CallVoidMethod(*event_listener,
+                                jni_mediamp_method_EventListener_onPropertyChange_STRING,
+                                prop_name,
                                 value);
             break;
         default:

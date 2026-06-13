@@ -217,8 +217,41 @@ bool mpv_handle_t::create_sw_render_context(int width, int height) {
     return true;
 }
 
+bool mpv_handle_t::resize_sw_render_context(int width, int height) {
+    if (!sw_render_ctx_) return false;
+    if (width <= 0 || height <= 0) return false;
+    if (width == sw_width_ && height == sw_height_) return true; // no change
+
+    LOG("Resizing SW render context: %dx%d -> %dx%d", sw_width_, sw_height_, width, height);
+
+    // Allocate new buffers
+    auto *new_back = new(std::nothrow) uint8_t[width * height * 4];
+    auto *new_front = new(std::nothrow) uint8_t[width * height * 4];
+    if (!new_back || !new_front) {
+        delete[] new_back;
+        delete[] new_front;
+        LOG("Failed to allocate buffers for resize");
+        return false;
+    }
+    memset(new_back, 0, width * height * 4);
+    memset(new_front, 0, width * height * 4);
+
+    // Synchronize with render thread
+    std::lock_guard<std::mutex> lock(resize_mutex_);
+    delete[] sw_pixel_buffer_;
+    delete[] sw_front_buffer_;
+    sw_pixel_buffer_ = new_back;
+    sw_front_buffer_ = new_front;
+    sw_width_ = width;
+    sw_height_ = height;
+
+    return true;
+}
+
 bool mpv_handle_t::render_sw_frame() {
     if (!sw_render_ctx_ || !sw_pixel_buffer_) return false;
+
+    std::lock_guard<std::mutex> lock(resize_mutex_);
 
     int32_t size[] = {sw_width_, sw_height_};
     int pitch = 4 * sw_width_;
@@ -235,22 +268,6 @@ bool mpv_handle_t::render_sw_frame() {
     if (result < 0) {
         return false;
     }
-
-    // Detect actual video resolution and resize buffers if needed
-    if (size[0] != sw_width_ || size[1] != sw_height_) {
-        int new_w = size[0];
-        int new_h = size[1];
-        if (new_w > 0 && new_h > 0) {
-            delete[] sw_pixel_buffer_;
-            delete[] sw_front_buffer_;
-            sw_width_ = new_w;
-            sw_height_ = new_h;
-            sw_pixel_buffer_ = new uint8_t[new_w * new_h * 4];
-            sw_front_buffer_ = new uint8_t[new_w * new_h * 4];
-        }
-    }
-    video_width_ = size[0];
-    video_height_ = size[1];
 
     // Swap back and front buffers:
     // mpv wrote to sw_pixel_buffer_ (back), display reads from sw_front_buffer_
@@ -300,6 +317,61 @@ int mpv_handle_t::get_video_height() const {
     return video_height_;
 }
 
+bool mpv_handle_t::query_video_resolution(int *out_w, int *out_h) {
+    if (!handle_) return false;
+
+    // Try reading video-params as NODE first
+    mpv_node node;
+    int result = mpv_get_property(handle_, "video-params", MPV_FORMAT_NODE, &node);
+    if (result >= 0 && node.format == MPV_FORMAT_NODE_MAP && node.u.list) {
+        *out_w = 0;
+        *out_h = 0;
+        mpv_node_list *list = node.u.list;
+        for (int i = 0; i < list->num; i++) {
+            const char *key = list->keys[i];
+            if (!key) continue;
+            if (strcmp(key, "w") == 0 && list->values[i].format == MPV_FORMAT_INT64) {
+                *out_w = (int) list->values[i].u.int64;
+            } else if (strcmp(key, "h") == 0 && list->values[i].format == MPV_FORMAT_INT64) {
+                *out_h = (int) list->values[i].u.int64;
+            }
+        }
+        mpv_free_node_contents(&node);
+        if (*out_w > 0 && *out_h > 0) {
+            LOG("query_video_resolution (NODE): %dx%d", *out_w, *out_h);
+            return true;
+        }
+    }
+
+    // Fallback: try reading as INT64 sub-properties directly
+    int64_t w = 0, h = 0;
+    if (mpv_get_property(handle_, "video-params/w", MPV_FORMAT_INT64, &w) >= 0 &&
+        mpv_get_property(handle_, "video-params/h", MPV_FORMAT_INT64, &h) >= 0) {
+        *out_w = (int) w;
+        *out_h = (int) h;
+        if (*out_w > 0 && *out_h > 0) {
+            LOG("query_video_resolution (INT64 sub-prop): %dx%d", *out_w, *out_h);
+            return true;
+        }
+    }
+
+    // Fallback: try width/height properties
+    if (mpv_get_property(handle_, "width", MPV_FORMAT_INT64, &w) >= 0 &&
+        mpv_get_property(handle_, "height", MPV_FORMAT_INT64, &h) >= 0) {
+        *out_w = (int) w;
+        *out_h = (int) h;
+        if (*out_w > 0 && *out_h > 0) {
+            LOG("query_video_resolution (width/height): %dx%d", *out_w, *out_h);
+            return true;
+        }
+    }
+
+    LOG("query_video_resolution: all methods failed");
+    *out_w = 0;
+    *out_h = 0;
+    return false;
+}
+
 void mpv_handle_t::wait_for_frame() {
     // Hybrid: try condition variable first (fast path from callback),
     // fall back to polling mpv_render_context_update() if callback doesn't fire.
@@ -337,12 +409,13 @@ bool mpv_handle_t::has_pending_frame() {
 }
 
 bool mpv_handle_t::copy_sw_pixels(uint8_t *out, int out_size, int *out_width, int *out_height) {
+    std::lock_guard<std::mutex> lock(resize_mutex_);
     if (!sw_front_buffer_ || sw_width_ <= 0 || sw_height_ <= 0) return false;
     int size = sw_width_ * sw_height_ * 4;
     if (out_size < size) return false;
     memcpy(out, sw_front_buffer_, size);
-    *out_width = video_width_;
-    *out_height = video_height_;
+    *out_width = sw_width_;
+    *out_height = sw_height_;
     return true;
 }
 

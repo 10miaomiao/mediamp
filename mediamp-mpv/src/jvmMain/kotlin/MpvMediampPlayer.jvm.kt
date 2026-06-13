@@ -33,16 +33,15 @@ actual class MpvMediampPlayer (
     
     private val eventListener = object : EventListener {
         override fun onPropertyChange(name: String) {
-            
         }
 
         override fun onPropertyChange(name: String, value: Boolean) {
             when (name) {
-                "pause" -> playbackState.value = 
+                "pause" -> playbackState.value =
                     if (value) PlaybackState.PAUSED else PlaybackState.PLAYING
                 "paused-for-cache" -> playbackState.value =
                     if (value) PlaybackState.PAUSED_BUFFERING else PlaybackState.PLAYING
-                
+
             }
         }
 
@@ -112,6 +111,7 @@ actual class MpvMediampPlayer (
 
         handle.option("hwdec", "auto")
         handle.option("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
+        handle.option("sw-fast", "yes")
         handle.option("input-default-bindings", "yes")
 
         // Limit demuxer cache
@@ -139,6 +139,7 @@ actual class MpvMediampPlayer (
         handle.observeProperty("media-title", MPVFormat.MPV_FORMAT_STRING) // to
         handle.observeProperty("metadata", MPVFormat.MPV_FORMAT_NONE)
         handle.observeProperty("hwdec-current", MPVFormat.MPV_FORMAT_NONE)
+        // video-params observation removed: resolution is now polled in render loop
     }
     
     @InternalMediampApi
