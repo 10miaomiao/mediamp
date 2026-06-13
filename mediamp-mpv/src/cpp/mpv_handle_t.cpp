@@ -375,11 +375,11 @@ bool mpv_handle_t::query_video_resolution(int *out_w, int *out_h) {
 void mpv_handle_t::wait_for_frame() {
     // Hybrid: try condition variable first (fast path from callback),
     // fall back to polling mpv_render_context_update() if callback doesn't fire.
-    while (sw_render_ctx_ || gl_render_ctx_) {
+    while (sw_render_ctx_ || gl_render_ctx_ || angle_render_ctx_) {
         {
             std::unique_lock<std::mutex> lock(frame_mutex_);
             if (frame_cv_.wait_for(lock, std::chrono::milliseconds(2),
-                [this] { return frame_ready_ || (!sw_render_ctx_ && !gl_render_ctx_); })) {
+                [this] { return frame_ready_ || (!sw_render_ctx_ && !gl_render_ctx_ && !angle_render_ctx_); })) {
                 frame_ready_ = false;
                 return;
             }
@@ -388,6 +388,9 @@ void mpv_handle_t::wait_for_frame() {
         mpv_render_context *ctx = sw_render_ctx_;
         if (!ctx && gl_render_ctx_) {
             ctx = gl_render_ctx_->getMpvRenderContext();
+        }
+        if (!ctx && angle_render_ctx_) {
+            ctx = angle_render_ctx_->getMpvRenderContext();
         }
         if (ctx) {
             uint64_t flags = mpv_render_context_update(ctx);
@@ -402,6 +405,9 @@ bool mpv_handle_t::has_pending_frame() {
     mpv_render_context *ctx = sw_render_ctx_;
     if (!ctx && gl_render_ctx_) {
         ctx = gl_render_ctx_->getMpvRenderContext();
+    }
+    if (!ctx && angle_render_ctx_) {
+        ctx = angle_render_ctx_->getMpvRenderContext();
     }
     if (!ctx) return false;
     uint64_t flags = mpv_render_context_update(ctx);
@@ -477,11 +483,92 @@ int mpv_handle_t::get_gl_height() const {
     return gl_render_ctx_ ? gl_render_ctx_->getHeight() : 0;
 }
 
+// ANGLE render context (GPU-accelerated via D3D11)
+
+bool mpv_handle_t::create_angle_render_context(int width, int height) {
+    FP;
+    CHECK_HANDLE()
+
+    if (angle_render_ctx_) {
+        destroy_angle_render_context();
+    }
+
+    angle_render_ctx_ = new angle_render_context_t(handle_, width, height);
+    if (!angle_render_ctx_->isValid()) {
+        LOG("Failed to create ANGLE render context");
+        delete angle_render_ctx_;
+        angle_render_ctx_ = nullptr;
+        return false;
+    }
+
+    // Register update callback for event-driven rendering
+    mpv_render_context *render_ctx = angle_render_ctx_->getMpvRenderContext();
+    if (render_ctx) {
+        mpv_render_context_set_update_callback(render_ctx, [](void *ctx) {
+            auto *self = static_cast<mpv_handle_t*>(ctx);
+            {
+                std::lock_guard<std::mutex> lock(self->frame_mutex_);
+                self->frame_ready_ = true;
+            }
+            self->frame_cv_.notify_one();
+        }, this);
+    }
+
+    LOG("ANGLE render context created: %dx%d", width, height);
+    return true;
+}
+
+bool mpv_handle_t::resize_angle_render_context(int width, int height) {
+    if (!angle_render_ctx_) return false;
+    return angle_render_ctx_->resize(width, height);
+}
+
+bool mpv_handle_t::render_angle_frame() {
+    if (!angle_render_ctx_) return false;
+    return angle_render_ctx_->render();
+}
+
+void mpv_handle_t::destroy_angle_render_context() {
+    if (angle_render_ctx_) {
+        delete angle_render_ctx_;
+        angle_render_ctx_ = nullptr;
+    }
+    // Wake up any thread blocked in wait_for_frame()
+    frame_cv_.notify_all();
+}
+
+bool mpv_handle_t::copy_angle_pixels(uint8_t *out, int out_size, int *out_width, int *out_height) {
+    if (!angle_render_ctx_) return false;
+    int w = angle_render_ctx_->getWidth();
+    int h = angle_render_ctx_->getHeight();
+    int size = w * h * 4;
+    if (out_size < size) return false;
+    const uint8_t *pixels = angle_render_ctx_->getPixelBuffer();
+    if (!pixels) return false;
+    memcpy(out, pixels, size);
+    *out_width = w;
+    *out_height = h;
+    return true;
+}
+
+int mpv_handle_t::get_angle_width() const {
+    return angle_render_ctx_ ? angle_render_ctx_->getWidth() : 0;
+}
+
+int mpv_handle_t::get_angle_height() const {
+    return angle_render_ctx_ ? angle_render_ctx_->getHeight() : 0;
+}
+
+bool mpv_handle_t::is_angle_available() const {
+    return angle_render_ctx_ != nullptr;
+}
+
 bool mpv_handle_t::destroy(JNIEnv *env) {
     FP;
     CHECK_HANDLE()
 
     // Destroy render contexts before mpv handle
+    destroy_angle_render_context();
     destroy_gl_render_context();
     destroy_sw_render_context();
 

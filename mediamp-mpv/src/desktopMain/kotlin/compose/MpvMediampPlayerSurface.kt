@@ -81,14 +81,22 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
     private var resolutionChecked = false
     private val resolutionOut = IntArray(2)
 
+    // Rendering mode
+    private var useAngle = false
+
     fun start() {
         if (running) return
         running = true
 
         val handle = player.impl
 
+        // Detect which render context is available
+        useAngle = false // ANGLE D3D11 disabled for now (performance/stability issues)
+        val threadName = "mpv-sw-render"
+        println("[Render] Using SW render path")
+
         renderThread = Thread({
-            Thread.currentThread().name = "mpv-sw-render"
+            Thread.currentThread().name = threadName
             var renderedFrames = 0L
             var skippedFrames = 0L
             var lastStatTime = System.nanoTime()
@@ -110,8 +118,12 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                                 val targetW = minOf(vw, 1920)
                                 val targetH = minOf(vh, 1080)
                                 if (targetW != currentRenderW || targetH != currentRenderH) {
-                                    println("[Render] Resizing SW context: ${currentRenderW}x${currentRenderH} -> ${targetW}x${targetH}")
-                                    handle.resizeSwRenderContext(targetW, targetH)
+                                    println("[Render] Resizing ${if (useAngle) "ANGLE" else "SW"} context: ${currentRenderW}x${currentRenderH} -> ${targetW}x${targetH}")
+                                    if (useAngle) {
+                                        handle.resizeAngleRenderContext(targetW, targetH)
+                                    } else {
+                                        handle.resizeSwRenderContext(targetW, targetH)
+                                    }
                                     currentRenderW = targetW
                                     currentRenderH = targetH
                                 }
@@ -121,27 +133,47 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                     }
 
                     val t0 = System.nanoTime()
-                    if (handle.renderSwFrame()) {
+                    val rendered = if (useAngle) {
+                        handle.renderAngleFrame()
+                    } else {
+                        handle.renderSwFrame()
+                    }
+
+                    if (rendered) {
                         lastRenderMs = (System.nanoTime() - t0) / 1_000_000
                         renderedFrames++
 
-                        val neededSize = handle.getSwWidth() * handle.getSwHeight() * 4
-                        if (neededSize <= 0) continue
-                        if (pixelBuffer.size < neededSize) {
-                            pixelBuffer = ByteArray(neededSize)
+                        val w: Int
+                        val h: Int
+                        val copied: Boolean
+
+                        if (useAngle) {
+                            val neededSize = handle.getAngleWidth() * handle.getAngleHeight() * 4
+                            if (neededSize <= 0) continue
+                            if (pixelBuffer.size < neededSize) {
+                                pixelBuffer = ByteArray(neededSize)
+                            }
+                            copied = handle.copyAnglePixels(pixelBuffer, sizeOut)
+                            w = sizeOut[0]
+                            h = sizeOut[1]
+                        } else {
+                            val neededSize = handle.getSwWidth() * handle.getSwHeight() * 4
+                            if (neededSize <= 0) continue
+                            if (pixelBuffer.size < neededSize) {
+                                pixelBuffer = ByteArray(neededSize)
+                            }
+                            copied = handle.copySwPixels(pixelBuffer, sizeOut)
+                            w = sizeOut[0]
+                            h = sizeOut[1]
                         }
-                        if (handle.copySwPixels(pixelBuffer, sizeOut)) {
-                            val w = sizeOut[0]
-                            val h = sizeOut[1]
-                            if (w > 0 && h > 0) {
-                                val buf = pixelBuffer
-                                SwingUtilities.invokeLater {
-                                    // Create a new Bitmap each frame to ensure Compose detects the change
-                                    val bmp = Bitmap()
-                                    bmp.allocPixels(ImageInfo.makeN32Premul(w, h))
-                                    bmp.installPixels(ImageInfo.makeN32Premul(w, h), buf, w * 4)
-                                    bitmapState.value = bmp.asComposeImageBitmap()
-                                }
+
+                        if (copied && w > 0 && h > 0) {
+                            val buf = pixelBuffer
+                            SwingUtilities.invokeLater {
+                                val bmp = Bitmap()
+                                bmp.allocPixels(ImageInfo.makeN32Premul(w, h))
+                                bmp.installPixels(ImageInfo.makeN32Premul(w, h), buf, w * 4)
+                                bitmapState.value = bmp.asComposeImageBitmap()
                             }
                         }
                     } else {
@@ -153,7 +185,8 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                     if (elapsed >= 5_000_000_000L) {
                         val totalFrames = renderedFrames + skippedFrames
                         val fps = renderedFrames * 1_000_000_000.0 / elapsed
-                        println("[Render] SW FPS: ${"%.1f".format(fps)}, rendered=$renderedFrames, skipped=$skippedFrames, total=$totalFrames, render=${currentRenderW}x${currentRenderH}, last render=${lastRenderMs}ms")
+                        val mode = if (useAngle) "ANGLE" else "SW"
+                        println("[Render] $mode FPS: ${"%.1f".format(fps)}, rendered=$renderedFrames, skipped=$skippedFrames, total=$totalFrames, render=${currentRenderW}x${currentRenderH}, last render=${lastRenderMs}ms")
                         renderedFrames = 0
                         skippedFrames = 0
                         lastStatTime = now
@@ -165,7 +198,7 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                     Thread.sleep(100)
                 }
             }
-        }, "mpv-sw-render").apply {
+        }, threadName).apply {
             isDaemon = true
             start()
         }

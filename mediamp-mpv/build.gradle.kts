@@ -60,6 +60,7 @@ kotlin {
             api(compose.desktop.currentOs) {
                 exclude(compose.material) // We use material3
             }
+            implementation("net.java.dev.jna:jna:5.14.0")
         }
     }
 }

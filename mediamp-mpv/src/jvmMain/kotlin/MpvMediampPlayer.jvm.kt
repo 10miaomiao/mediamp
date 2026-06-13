@@ -69,6 +69,9 @@ actual class MpvMediampPlayer (
 
     override val impl: MPVHandle get() = handle
 
+    /** Windows 上使用 vo=gpu + D3D11 直接渲染到原生窗口 */
+    val isGpuRenderMode: Boolean = currentPlatform() is Platform.Windows
+
     override val currentPositionMillis: MutableStateFlow<Long> = MutableStateFlow(0L)
     
     override val mediaProperties: MutableStateFlow<MediaProperties?> = MutableStateFlow(null)
@@ -91,8 +94,18 @@ actual class MpvMediampPlayer (
         handle.setEventListener(eventListener)
 
         handle.option("config", "no")
-        // 使用 libmpv vo，由 render context 驱动渲染
-        handle.option("vo", "libmpv")
+
+        val isWindows = currentPlatform() is Platform.Windows
+
+        if (isWindows) {
+            // Windows: 使用 vo=gpu + D3D11，mpv 直接渲染到原生窗口
+            handle.option("vo", "gpu")
+            handle.option("gpu-api", "d3d11")
+            handle.option("gpu-context", "d3d11")
+        } else {
+            // 非 Windows: 使用 vo=libmpv，由 render context 驱动渲染
+            handle.option("vo", "libmpv")
+        }
 
         when (currentPlatform()) {
             is Platform.Android -> {
@@ -125,10 +138,12 @@ actual class MpvMediampPlayer (
 
         handle.initialize()
 
-        // 创建 SW render context（在 mpv_initialize 之后，loadfile 之前）
-        if (currentPlatform() !is Platform.Android) {
+        // 创建渲染上下文（在 mpv_initialize 之后，loadfile 之前）
+        if (!isWindows && currentPlatform() !is Platform.Android) {
+            // 非 Windows 桌面端：使用 SW 渲染
             handle.createSwRenderContext(1920, 1080)
         }
+        // Windows 使用 vo=gpu + wid 嵌入方式，不需要创建 render context
 
         handle.observeProperty("time-pos/full", MPVFormat.MPV_FORMAT_INT64)
         handle.observeProperty("duration/full", MPVFormat.MPV_FORMAT_INT64)

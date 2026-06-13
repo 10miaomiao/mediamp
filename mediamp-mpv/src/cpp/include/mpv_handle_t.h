@@ -15,6 +15,7 @@
 #include "compatible_thread.h"
 #include "log.h"
 #include "render_context_t.h"
+#include "angle_render_context_t.h"
 
 namespace mediampv {
 
@@ -55,13 +56,23 @@ public:
     bool has_pending_frame();
     bool copy_sw_pixels(uint8_t *out, int out_size, int *out_width, int *out_height);
 
-    // OpenGL render context (GPU-accelerated)
+    // OpenGL render context (GPU-accelerated via WGL)
     bool create_gl_render_context(int width, int height);
     bool render_gl_frame();
     void destroy_gl_render_context();
     bool copy_gl_pixels(uint8_t *out, int out_size, int *out_width, int *out_height);
     int get_gl_width() const;
     int get_gl_height() const;
+
+    // ANGLE render context (GPU-accelerated via D3D11)
+    bool create_angle_render_context(int width, int height);
+    bool resize_angle_render_context(int width, int height);
+    bool render_angle_frame();
+    void destroy_angle_render_context();
+    bool copy_angle_pixels(uint8_t *out, int out_size, int *out_width, int *out_height);
+    int get_angle_width() const;
+    int get_angle_height() const;
+    bool is_angle_available() const;
 
 private:
     JavaVM *jvm_;
@@ -83,8 +94,11 @@ private:
     int video_width_ = 0;
     int video_height_ = 0;
 
-    // OpenGL render context (GPU-accelerated)
+    // OpenGL render context (GPU-accelerated via WGL)
     render_context_t *gl_render_ctx_ = nullptr;
+
+    // ANGLE render context (GPU-accelerated via D3D11)
+    angle_render_context_t *angle_render_ctx_ = nullptr;
 
     // Event-driven rendering synchronization
     std::mutex frame_mutex_;

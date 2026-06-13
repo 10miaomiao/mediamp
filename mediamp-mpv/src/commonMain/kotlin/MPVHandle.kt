@@ -54,6 +54,10 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         return nSetPropertyInt(ptr, name, value)
     }
 
+    fun setPropertyLong(name: String, value: Long): Boolean {
+        return nSetPropertyLong(ptr, name, value)
+    }
+
     fun setPropertyBoolean(name: String, value: Boolean): Boolean {
         return nSetPropertyBoolean(ptr, name, value)
     }
@@ -128,7 +132,7 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         return nHasPendingFrame(ptr)
     }
 
-    // OpenGL render context (GPU-accelerated)
+    // OpenGL render context (GPU-accelerated via WGL)
 
     fun createGlRenderContext(width: Int, height: Int): Boolean {
         return nCreateGlRenderContext(ptr, width, height)
@@ -152,6 +156,40 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
 
     fun getGlHeight(): Int {
         return nGetGlHeight(ptr)
+    }
+
+    // ANGLE render context (GPU-accelerated via D3D11)
+
+    fun createAngleRenderContext(width: Int, height: Int): Boolean {
+        return nCreateAngleRenderContext(ptr, width, height)
+    }
+
+    fun resizeAngleRenderContext(width: Int, height: Int): Boolean {
+        return nResizeAngleRenderContext(ptr, width, height)
+    }
+
+    fun renderAngleFrame(): Boolean {
+        return nRenderAngleFrame(ptr)
+    }
+
+    fun destroyAngleRenderContext() {
+        nDestroyAngleRenderContext(ptr)
+    }
+
+    fun copyAnglePixels(outArray: ByteArray, outSize: IntArray): Boolean {
+        return nCopyAnglePixels(ptr, outArray, outSize)
+    }
+
+    fun getAngleWidth(): Int {
+        return nGetAngleWidth(ptr)
+    }
+
+    fun getAngleHeight(): Int {
+        return nGetAngleHeight(ptr)
+    }
+
+    fun isAngleAvailable(): Boolean {
+        return nIsAngleAvailable(ptr)
     }
 
     /**
@@ -218,6 +256,7 @@ private external fun nGetPropertyBoolean(ptr: Long, name: String): Boolean
 private external fun nGetPropertyDouble(ptr: Long, name: String): Double
 private external fun nGetPropertyString(ptr: Long, name: String): String
 private external fun nSetPropertyInt(ptr: Long, name: String, value: Int): Boolean
+private external fun nSetPropertyLong(ptr: Long, name: String, value: Long): Boolean
 private external fun nSetPropertyBoolean(ptr: Long, name: String, value: Boolean): Boolean
 private external fun nSetPropertyStringList(ptr: Long, name: String, values: Array<String>): Boolean
 private external fun nSetPropertyDouble(ptr: Long, name: String, value: Double): Boolean
@@ -251,13 +290,23 @@ private external fun nQueryVideoResolution(ptr: Long, outSize: IntArray): Boolea
 private external fun nWaitForFrame(ptr: Long)
 private external fun nHasPendingFrame(ptr: Long): Boolean
 
-// OpenGL render context native methods (GPU-accelerated)
+// OpenGL render context native methods (GPU-accelerated via WGL)
 private external fun nCreateGlRenderContext(ptr: Long, width: Int, height: Int): Boolean
 private external fun nRenderGlFrame(ptr: Long): Boolean
 private external fun nDestroyGlRenderContext(ptr: Long)
 private external fun nCopyGlPixels(ptr: Long, outArray: ByteArray, outSize: IntArray): Boolean
 private external fun nGetGlWidth(ptr: Long): Int
 private external fun nGetGlHeight(ptr: Long): Int
+
+// ANGLE render context native methods (GPU-accelerated via D3D11)
+private external fun nCreateAngleRenderContext(ptr: Long, width: Int, height: Int): Boolean
+private external fun nResizeAngleRenderContext(ptr: Long, width: Int, height: Int): Boolean
+private external fun nRenderAngleFrame(ptr: Long): Boolean
+private external fun nDestroyAngleRenderContext(ptr: Long)
+private external fun nCopyAnglePixels(ptr: Long, outArray: ByteArray, outSize: IntArray): Boolean
+private external fun nGetAngleWidth(ptr: Long): Int
+private external fun nGetAngleHeight(ptr: Long): Int
+private external fun nIsAngleAvailable(ptr: Long): Boolean
 
 private external fun nDestroy(ptr: Long): Boolean
 private external fun nFinalize(ptr: Long)

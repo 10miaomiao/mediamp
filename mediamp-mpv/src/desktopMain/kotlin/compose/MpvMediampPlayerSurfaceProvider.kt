@@ -1,5 +1,6 @@
 /*
  * MPV player surface provider for desktop Compose integration
+ * On Windows with GPU support, uses D3D11 direct rendering; otherwise falls back to SW
  */
 
 package org.openani.mediamp.mpv.compose
@@ -15,6 +16,10 @@ public class MpvMediampPlayerSurfaceProvider : MediampPlayerSurfaceProvider<MpvM
 
     @Composable
     override fun Surface(mediampPlayer: MpvMediampPlayer, modifier: Modifier) {
-        MpvMediampPlayerSurface(mediampPlayer, modifier)
+        if (mediampPlayer.isGpuRenderMode) {
+            MpvD3D11PlayerSurface(mediampPlayer, modifier)
+        } else {
+            MpvMediampPlayerSurface(mediampPlayer, modifier)
+        }
     }
 }
