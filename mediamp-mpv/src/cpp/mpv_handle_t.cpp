@@ -375,12 +375,18 @@ bool mpv_handle_t::query_video_resolution(int *out_w, int *out_h) {
 void mpv_handle_t::wait_for_frame() {
     // Hybrid: try condition variable first (fast path from callback),
     // fall back to polling mpv_render_context_update() if callback doesn't fire.
+    static int wait_call_count = 0;
+    wait_call_count++;
+    int poll_count = 0;
     while (sw_render_ctx_ || gl_render_ctx_ || angle_render_ctx_) {
         {
             std::unique_lock<std::mutex> lock(frame_mutex_);
             if (frame_cv_.wait_for(lock, std::chrono::milliseconds(2),
                 [this] { return frame_ready_ || (!sw_render_ctx_ && !gl_render_ctx_ && !angle_render_ctx_); })) {
                 frame_ready_ = false;
+                if (wait_call_count <= 5) {
+                    LOG("wait_for_frame #%d: returned via CV callback", wait_call_count);
+                }
                 return;
             }
         }
@@ -395,10 +401,18 @@ void mpv_handle_t::wait_for_frame() {
         if (ctx) {
             uint64_t flags = mpv_render_context_update(ctx);
             if (flags & MPV_RENDER_UPDATE_FRAME) {
+                if (wait_call_count <= 5) {
+                    LOG("wait_for_frame #%d: returned via poll (flags=0x%llX, polls=%d)", wait_call_count, flags, poll_count);
+                }
                 return;
             }
         }
+        poll_count++;
+        if (wait_call_count <= 5 && poll_count <= 3) {
+            LOG("wait_for_frame #%d: polling... ctx=%p, polls=%d", wait_call_count, ctx, poll_count);
+        }
     }
+    LOG("wait_for_frame #%d: all render contexts null, exiting", wait_call_count);
 }
 
 bool mpv_handle_t::has_pending_frame() {

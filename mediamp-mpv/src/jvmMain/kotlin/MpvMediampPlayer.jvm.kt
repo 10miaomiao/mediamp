@@ -127,17 +127,8 @@ actual class MpvMediampPlayer (
         handle.initialize()
 
         // 创建渲染上下文（在 mpv_initialize 之后，loadfile 之前）
-        if (currentPlatform() !is Platform.Android) {
-            // 桌面端优先使用 ANGLE 渲染上下文（D3D11 GPU 加速 + staging texture 像素回读）
-            // 回退到 SW 渲染上下文（CPU 渲染 + DirectByteBuffer）
-            val angleCreated = handle.createAngleRenderContext(1920, 1080)
-            if (angleCreated) {
-                println("[MPV] ANGLE render context created successfully")
-            } else {
-                println("[MPV] ANGLE not available, falling back to SW render context")
-                handle.createSwRenderContext(1920, 1080)
-            }
-        }
+        // 注意：ANGLE 渲染上下文延迟到渲染线程创建，避免 EGL 上下文线程亲和性问题
+        // SW 渲染上下文也延迟到渲染线程创建（ANGLE 初始化失败时的回退方案）
 
         handle.observeProperty("time-pos/full", MPVFormat.MPV_FORMAT_INT64)
         handle.observeProperty("duration/full", MPVFormat.MPV_FORMAT_INT64)
@@ -172,6 +163,24 @@ actual class MpvMediampPlayer (
     @InternalMediampApi
     fun setupGlSharedContext(mpvHglrc: Long): Boolean {
         return MPVHandle.setupGlContextWithHandles(handle.ptr, mpvHglrc)
+    }
+
+    /**
+     * 在渲染线程上创建 ANGLE 渲染上下文。
+     * 必须在渲染线程上调用，避免 EGL 上下文线程亲和性问题。
+     * @return true 如果 ANGLE 创建成功，false 则应回退到 SW
+     */
+    @InternalMediampApi
+    fun createAngleContextOnRenderThread(width: Int, height: Int): Boolean {
+        return handle.createAngleRenderContext(width, height)
+    }
+
+    /**
+     * 在渲染线程上创建 SW 渲染上下文（ANGLE 失败时的回退方案）。
+     */
+    @InternalMediampApi
+    fun createSwContextOnRenderThread(width: Int, height: Int): Boolean {
+        return handle.createSwRenderContext(width, height)
     }
 
     override suspend fun setMediaDataImpl(data: MediaData): MPVPlayerData {

@@ -93,6 +93,7 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
     private var currentRenderH = RENDER_HEIGHT
     private var resolutionChecked = false
     private val resolutionOut = IntArray(2)
+    private var successfulRenders = 0
 
     // Rendering mode
     private var useAngle = false
@@ -103,16 +104,10 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
 
         val handle = player.impl
 
-        // Detect ANGLE availability
-        useAngle = handle.isAngleAvailable()
-        val threadName = if (useAngle) "mpv-angle-render" else "mpv-sw-render"
-        println("[Render] Using ${if (useAngle) "ANGLE (D3D11 shared texture readback)" else "SW (DirectByteBuffer)"} render path")
-
-        if (!useAngle) {
-            // SW path: allocate DirectByteBuffer
-            renderBufferSize = RENDER_WIDTH * RENDER_HEIGHT * 4
-            renderBuffer = handle.createSwRenderBuffer(renderBufferSize)
-        }
+        // ANGLE/SW 渲染上下文将在渲染线程上创建（避免 EGL 线程亲和性问题）
+        // 默认尝试 ANGLE，失败则回退 SW
+        useAngle = true
+        val threadName = "mpv-render"
 
         renderThread = Thread({
             Thread.currentThread().name = threadName
@@ -121,51 +116,45 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
             var lastStatTime = System.nanoTime()
             var lastRenderMs = 0L
             var framesSinceResizeCheck = 0
+            var loopCount = 0
+
+            // 在渲染线程上创建渲染上下文（关键：避免 EGL 上下文线程亲和性问题）
+            if (useAngle) {
+                val angleOk = handle.createAngleRenderContext(RENDER_WIDTH, RENDER_HEIGHT)
+                if (angleOk) {
+                    println("[Render] ANGLE render context created on render thread (D3D11 shared texture)")
+                } else {
+                    println("[Render] ANGLE creation failed, falling back to SW")
+                    useAngle = false
+                }
+            }
+            if (!useAngle) {
+                handle.createSwRenderContext(RENDER_WIDTH, RENDER_HEIGHT)
+                renderBufferSize = RENDER_WIDTH * RENDER_HEIGHT * 4
+                renderBuffer = handle.createSwRenderBuffer(renderBufferSize)
+                println("[Render] SW render context created on render thread (DirectByteBuffer)")
+            }
+
             while (running) {
                 try {
+                    loopCount++
+                    if (loopCount <= 5) println("[Render] Loop #$loopCount: waiting for frame...")
                     handle.waitForFrame()
+                    if (loopCount <= 5) println("[Render] Loop #$loopCount: waitForFrame returned")
                     if (!running) break
 
-                    // Periodically check video resolution and resize if needed
-                    framesSinceResizeCheck++
-                    if (!resolutionChecked || framesSinceResizeCheck >= 30) {
-                        framesSinceResizeCheck = 0
-                        if (handle.queryVideoResolution(resolutionOut)) {
-                            val vw = resolutionOut[0]
-                            val vh = resolutionOut[1]
-                            if (vw > 0 && vh > 0) {
-                                val targetW = minOf(vw, 1920)
-                                val targetH = minOf(vh, 1080)
-                                if (targetW != currentRenderW || targetH != currentRenderH) {
-                                    println("[Render] Resizing context: ${currentRenderW}x${currentRenderH} -> ${targetW}x${targetH}")
-                                    if (useAngle) {
-                                        handle.resizeAngleRenderContext(targetW, targetH)
-                                    } else {
-                                        handle.resizeSwRenderContext(targetW, targetH)
-                                        val newBuf = handle.createSwRenderBuffer(targetW * targetH * 4)
-                                        val oldBuf = renderBuffer
-                                        renderBuffer = newBuf
-                                        renderBufferSize = targetW * targetH * 4
-                                        frameBytes = ByteArray(renderBufferSize)
-                                        if (oldBuf != null) handle.destroySwRenderBuffer(oldBuf)
-                                    }
-                                    currentRenderW = targetW
-                                    currentRenderH = targetH
-                                    resolutionChecked = true
-                                }
-                            }
-                        }
-                    }
-
+                    if (loopCount <= 5) println("[Render] Loop #$loopCount: starting render, useAngle=$useAngle")
                     val t0 = System.nanoTime()
                     val rendered = if (useAngle) {
                         renderAngleFrame(handle)
                     } else {
                         renderSwFrame(handle)
                     }
+                    if (loopCount <= 5) println("[Render] Loop #$loopCount: rendered=$rendered, useAngle=$useAngle")
                     if (rendered) {
                         lastRenderMs = (System.nanoTime() - t0) / 1_000_000
                         renderedFrames++
+                        successfulRenders++
 
                         val w = sizeOut[0]
                         val h = sizeOut[1]
@@ -181,6 +170,36 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                             }
                             skiaBitmap.installPixels(ImageInfo.makeN32Premul(w, h), frameBytes, w * 4)
                             bitmapState.value = skiaBitmap.asComposeImageBitmap()
+                        }
+
+                        // 在渲染成功后检查视频分辨率（避免在视频加载期间阻塞）
+                        // 只在成功渲染 MIN_FRAMES_FOR_RESOLUTION 帧后才查询
+                        if (successfulRenders >= MIN_FRAMES_FOR_RESOLUTION && (!resolutionChecked || successfulRenders % 30 == 0)) {
+                            if (handle.queryVideoResolution(resolutionOut)) {
+                                val vw = resolutionOut[0]
+                                val vh = resolutionOut[1]
+                                if (vw > 0 && vh > 0) {
+                                    val targetW = minOf(vw, 1920)
+                                    val targetH = minOf(vh, 1080)
+                                    if (targetW != currentRenderW || targetH != currentRenderH) {
+                                        println("[Render] Resizing context: ${currentRenderW}x${currentRenderH} -> ${targetW}x${targetH}")
+                                        if (useAngle) {
+                                            handle.resizeAngleRenderContext(targetW, targetH)
+                                        } else {
+                                            handle.resizeSwRenderContext(targetW, targetH)
+                                            val newBuf = handle.createSwRenderBuffer(targetW * targetH * 4)
+                                            val oldBuf = renderBuffer
+                                            renderBuffer = newBuf
+                                            renderBufferSize = targetW * targetH * 4
+                                            frameBytes = ByteArray(renderBufferSize)
+                                            if (oldBuf != null) handle.destroySwRenderBuffer(oldBuf)
+                                        }
+                                        currentRenderW = targetW
+                                        currentRenderH = targetH
+                                        resolutionChecked = true
+                                    }
+                                }
+                            }
                         }
                     } else {
                         skippedFrames++
@@ -270,5 +289,7 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
     companion object {
         private const val RENDER_WIDTH = 1920
         private const val RENDER_HEIGHT = 1080
+        // 视频加载期间 mpv_get_property("video-params") 可能阻塞，跳过前 N 帧
+        private const val MIN_FRAMES_FOR_RESOLUTION = 60
     }
 }
