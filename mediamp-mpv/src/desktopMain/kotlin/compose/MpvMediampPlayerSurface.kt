@@ -1,7 +1,7 @@
 /*
- * Desktop MPV player surface - renders MPV frames via software render context
- * VLC-style: mpv render → DirectByteBuffer → ByteArray → Skia Bitmap.installPixels → Compose Canvas
- * Uses DirectByteBuffer for native memory, reuses Skia Bitmap per frame
+ * Desktop MPV player surface - renders MPV frames
+ * ANGLE path: mpv ANGLE → D3D11 shared texture → staging texture readback → Skia Bitmap → Compose Canvas
+ * SW fallback: mpv SW → DirectByteBuffer → Skia Bitmap → Compose Canvas
  */
 
 package org.openani.mediamp.mpv.compose
@@ -70,14 +70,14 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
     var bitmapState = mutableStateOf<ImageBitmap?>(null)
         private set
 
-    // DirectByteBuffer for native memory (allocated by JNI, VLC-style)
-    private var renderBuffer: Any? = null  // java.nio.ByteBuffer (DirectByteBuffer)
-    private var renderBufferSize = 0
+    // ANGLE path: staging texture readback buffer
     private val sizeOut = IntArray(2)
-
-    // Pre-allocated ByteArray for pixel copy from DirectByteBuffer
     @Volatile
     private var frameBytes = ByteArray(RENDER_WIDTH * RENDER_HEIGHT * 4)
+
+    // SW path: DirectByteBuffer
+    private var renderBuffer: Any? = null
+    private var renderBufferSize = 0
 
     // Reusable Skia Bitmap — avoids per-frame Bitmap allocation
     private val skiaBitmap = Bitmap()
@@ -94,17 +94,25 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
     private var resolutionChecked = false
     private val resolutionOut = IntArray(2)
 
+    // Rendering mode
+    private var useAngle = false
+
     fun start() {
         if (running) return
         running = true
 
         val handle = player.impl
-        val threadName = "mpv-sw-render"
-        println("[Render] Using SW render path (DirectByteBuffer)")
 
-        // Allocate DirectByteBuffer via JNI
-        renderBufferSize = RENDER_WIDTH * RENDER_HEIGHT * 4
-        renderBuffer = handle.createSwRenderBuffer(renderBufferSize)
+        // Detect ANGLE availability
+        useAngle = handle.isAngleAvailable()
+        val threadName = if (useAngle) "mpv-angle-render" else "mpv-sw-render"
+        println("[Render] Using ${if (useAngle) "ANGLE (D3D11 shared texture readback)" else "SW (DirectByteBuffer)"} render path")
+
+        if (!useAngle) {
+            // SW path: allocate DirectByteBuffer
+            renderBufferSize = RENDER_WIDTH * RENDER_HEIGHT * 4
+            renderBuffer = handle.createSwRenderBuffer(renderBufferSize)
+        }
 
         renderThread = Thread({
             Thread.currentThread().name = threadName
@@ -129,26 +137,32 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                                 val targetW = minOf(vw, 1920)
                                 val targetH = minOf(vh, 1080)
                                 if (targetW != currentRenderW || targetH != currentRenderH) {
-                                    println("[Render] Resizing SW context: ${currentRenderW}x${currentRenderH} -> ${targetW}x${targetH}")
-                                    handle.resizeSwRenderContext(targetW, targetH)
+                                    println("[Render] Resizing context: ${currentRenderW}x${currentRenderH} -> ${targetW}x${targetH}")
+                                    if (useAngle) {
+                                        handle.resizeAngleRenderContext(targetW, targetH)
+                                    } else {
+                                        handle.resizeSwRenderContext(targetW, targetH)
+                                        val newBuf = handle.createSwRenderBuffer(targetW * targetH * 4)
+                                        val oldBuf = renderBuffer
+                                        renderBuffer = newBuf
+                                        renderBufferSize = targetW * targetH * 4
+                                        frameBytes = ByteArray(renderBufferSize)
+                                        if (oldBuf != null) handle.destroySwRenderBuffer(oldBuf)
+                                    }
                                     currentRenderW = targetW
                                     currentRenderH = targetH
-                                    // Reallocate DirectByteBuffer for new size
-                                    val newBuf = handle.createSwRenderBuffer(targetW * targetH * 4)
-                                    val oldBuf = renderBuffer
-                                    renderBuffer = newBuf
-                                    renderBufferSize = targetW * targetH * 4
-                                    frameBytes = ByteArray(renderBufferSize)
-                                    if (oldBuf != null) handle.destroySwRenderBuffer(oldBuf)
+                                    resolutionChecked = true
                                 }
-                                resolutionChecked = true
                             }
                         }
                     }
 
                     val t0 = System.nanoTime()
-                    val buf = renderBuffer ?: continue
-                    val rendered = handle.renderSwFrameToBuffer(buf, renderBufferSize, sizeOut)
+                    val rendered = if (useAngle) {
+                        renderAngleFrame(handle)
+                    } else {
+                        renderSwFrame(handle)
+                    }
                     if (rendered) {
                         lastRenderMs = (System.nanoTime() - t0) / 1_000_000
                         renderedFrames++
@@ -157,17 +171,6 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                         val h = sizeOut[1]
                         val neededSize = w * h * 4
                         if (neededSize <= 0 || w <= 0 || h <= 0) continue
-
-                        // Ensure frameBytes is large enough
-                        if (frameBytes.size < neededSize) {
-                            frameBytes = ByteArray(neededSize)
-                        }
-
-                        // VLC-style: copy from DirectByteBuffer to ByteArray
-                        val byteBuf = buf as ByteBuffer
-                        byteBuf.rewind()
-                        byteBuf.limit(neededSize)
-                        byteBuf.get(frameBytes, 0, neededSize)
 
                         SwingUtilities.invokeLater {
                             // Reuse Skia Bitmap if size unchanged
@@ -188,7 +191,8 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                     if (elapsed >= 5_000_000_000L) {
                         val totalFrames = renderedFrames + skippedFrames
                         val fps = renderedFrames * 1_000_000_000.0 / elapsed
-                        println("[Render] SW FPS: ${"%.1f".format(fps)}, rendered=$renderedFrames, skipped=$skippedFrames, total=$totalFrames, render=${currentRenderW}x${currentRenderH}, last render=${lastRenderMs}ms")
+                        val path = if (useAngle) "ANGLE" else "SW"
+                        println("[Render] $path FPS: ${"%.1f".format(fps)}, rendered=$renderedFrames, skipped=$skippedFrames, total=$totalFrames, render=${currentRenderW}x${currentRenderH}, last render=${lastRenderMs}ms")
                         renderedFrames = 0
                         skippedFrames = 0
                         lastStatTime = now
@@ -206,15 +210,60 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
         }
     }
 
+    /**
+     * ANGLE path: render ANGLE frame, then read pixels via D3D11 staging texture.
+     * Returns true if a frame was rendered successfully.
+     */
+    private fun renderAngleFrame(handle: org.openani.mediamp.mpv.MPVHandle): Boolean {
+        if (!handle.renderAngleFrame()) return false
+
+        val w = currentRenderW
+        val h = currentRenderH
+        val neededSize = w * h * 4
+        if (frameBytes.size < neededSize) {
+            frameBytes = ByteArray(neededSize)
+        }
+
+        // Read pixels from D3D11 shared texture via staging texture (fast, ~5ms for 1080p)
+        if (!handle.readPixelsFromSharedTexture(frameBytes, sizeOut)) return false
+        return true
+    }
+
+    /**
+     * SW path: render SW frame to DirectByteBuffer, then copy to ByteArray.
+     * Returns true if a frame was rendered successfully.
+     */
+    private fun renderSwFrame(handle: org.openani.mediamp.mpv.MPVHandle): Boolean {
+        val buf = renderBuffer ?: return false
+        if (!handle.renderSwFrameToBuffer(buf, renderBufferSize, sizeOut)) return false
+
+        val w = sizeOut[0]
+        val h = sizeOut[1]
+        val neededSize = w * h * 4
+        if (neededSize <= 0 || w <= 0 || h <= 0) return false
+
+        if (frameBytes.size < neededSize) {
+            frameBytes = ByteArray(neededSize)
+        }
+
+        val byteBuf = buf as ByteBuffer
+        byteBuf.rewind()
+        byteBuf.limit(neededSize)
+        byteBuf.get(frameBytes, 0, neededSize)
+        return true
+    }
+
     fun stop() {
         running = false
         renderThread?.interrupt()
         renderThread = null
-        // Free DirectByteBuffer
-        val buf = renderBuffer
-        if (buf != null) {
-            player.impl.destroySwRenderBuffer(buf)
-            renderBuffer = null
+        // Free SW DirectByteBuffer if used
+        if (!useAngle) {
+            val buf = renderBuffer
+            if (buf != null) {
+                player.impl.destroySwRenderBuffer(buf)
+                renderBuffer = null
+            }
         }
     }
 

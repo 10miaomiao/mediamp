@@ -1,25 +1,29 @@
 /*
- * MPV player surface provider for desktop Compose integration
- * On Windows with GPU support, uses D3D11 direct rendering; otherwise falls back to SW
+ * MPV player surface provider for desktop Compose integration.
+ *
+ * Windows: GPU direct output via shared GL context (zero CPU readback).
+ * Other platforms: Canvas-based SW rendering (mpv SW → ByteBuffer → Bitmap → Canvas).
  */
 
 package org.openani.mediamp.mpv.compose
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import org.openani.mediamp.InternalMediampApi
 import org.openani.mediamp.compose.MediampPlayerSurfaceProvider
+import org.openani.mediamp.internal.Platform
+import org.openani.mediamp.internal.currentPlatform
 import org.openani.mediamp.mpv.MpvMediampPlayer
 import kotlin.reflect.KClass
 
 public class MpvMediampPlayerSurfaceProvider : MediampPlayerSurfaceProvider<MpvMediampPlayer> {
     override val forClass: KClass<MpvMediampPlayer> = MpvMediampPlayer::class
 
+    @OptIn(InternalMediampApi::class)
     @Composable
     override fun Surface(mediampPlayer: MpvMediampPlayer, modifier: Modifier) {
-        if (mediampPlayer.isGpuRenderMode) {
-            MpvD3D11PlayerSurface(mediampPlayer, modifier)
-        } else {
-            MpvMediampPlayerSurface(mediampPlayer, modifier)
-        }
+        // All platforms: Canvas-based rendering (mpv SW/GL → Bitmap → Canvas)
+        // GPU texture direct output via shared GL context is not yet stable.
+        MpvMediampPlayerSurface(mediampPlayer, modifier)
     }
 }

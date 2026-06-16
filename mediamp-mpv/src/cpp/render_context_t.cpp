@@ -64,6 +64,28 @@ static PFNGLFRAMEBUFFERRENDERBUFFERPROC _glFramebufferRenderbuffer = nullptr;
 static PFNGLDELETERENDERBUFFERSPROC _glDeleteRenderbuffers = nullptr;
 static PFNGLDELETEFRAMEBUFFERSPROC _glDeleteFramebuffers = nullptr;
 static PFNGLCHECKFRAMEBUFFERSTATUSPROC _glCheckFramebufferStatus = nullptr;
+
+// Core GL functions loaded via wglGetProcAddress (opengl32.dll's versions may not work)
+typedef void (APIENTRY *PFNGLGENTEXTURESPROC)(GLsizei, GLuint*);
+typedef void (APIENTRY *PFNGLDELETETEXTURESPROC)(GLsizei, const GLuint*);
+typedef void (APIENTRY *PFNGLBINDTEXTUREPROC)(GLenum, GLuint);
+typedef void (APIENTRY *PFNGLTEXIMAGE2DPROC)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
+typedef void (APIENTRY *PFNGLTEXPARAMETERIPROC)(GLenum, GLenum, GLint);
+typedef void (APIENTRY *PFNGLVIEWPORTPROC)(GLint, GLint, GLsizei, GLsizei);
+typedef void (APIENTRY *PFNGLCLEARPROC)(GLbitfield);
+typedef void (APIENTRY *PFNGLREADPIXELSPROC)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*);
+typedef const GLubyte* (APIENTRY *PFNGLGETSTRINGPROC)(GLenum);
+typedef GLenum (APIENTRY *PFNGLGETERRORPROC)(void);
+static PFNGLGENTEXTURESPROC _glGenTextures = nullptr;
+static PFNGLDELETETEXTURESPROC _glDeleteTextures = nullptr;
+static PFNGLBINDTEXTUREPROC _glBindTexture = nullptr;
+static PFNGLTEXIMAGE2DPROC _glTexImage2D = nullptr;
+static PFNGLTEXPARAMETERIPROC _glTexParameteri = nullptr;
+static PFNGLVIEWPORTPROC _glViewport = nullptr;
+static PFNGLCLEARPROC _glClear = nullptr;
+static PFNGLREADPIXELSPROC _glReadPixels = nullptr;
+static PFNGLGETSTRINGPROC _glGetString = nullptr;
+static PFNGLGETERRORPROC _glGetError = nullptr;
 #define glGenFramebuffers _glGenFramebuffers
 #define glBindFramebuffer _glBindFramebuffer
 #define glFramebufferTexture2D _glFramebufferTexture2D
@@ -127,7 +149,8 @@ static bool loadWGLExtensions(HDC hdc, HGLRC &out_context) {
     return true;
 }
 
-static void loadGLFunctions() {
+static void loadGLFunctions(HINSTANCE opengl32) {
+    // Extension functions — must use wglGetProcAddress
     _glGenFramebuffers = (PFNGLGENFRAMEBUFFERSPROC)wglGetProcAddress("glGenFramebuffers");
     _glBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)wglGetProcAddress("glBindFramebuffer");
     _glFramebufferTexture2D = (PFNGLFRAMEBUFFERTEXTURE2DPROC)wglGetProcAddress("glFramebufferTexture2D");
@@ -138,6 +161,24 @@ static void loadGLFunctions() {
     _glDeleteRenderbuffers = (PFNGLDELETERENDERBUFFERSPROC)wglGetProcAddress("glDeleteRenderbuffers");
     _glDeleteFramebuffers = (PFNGLDELETEFRAMEBUFFERSPROC)wglGetProcAddress("glDeleteFramebuffers");
     _glCheckFramebufferStatus = (PFNGLCHECKFRAMEBUFFERSTATUSPROC)wglGetProcAddress("glCheckFramebufferStatus");
+
+    // Core GL 1.1 functions — load from opengl32.dll module handle.
+    // wglGetProcAddress does NOT work for core 1.1 functions on some drivers.
+    _glGenTextures = (PFNGLGENTEXTURESPROC)GetProcAddress(opengl32, "glGenTextures");
+    _glDeleteTextures = (PFNGLDELETETEXTURESPROC)GetProcAddress(opengl32, "glDeleteTextures");
+    _glBindTexture = (PFNGLBINDTEXTUREPROC)GetProcAddress(opengl32, "glBindTexture");
+    _glTexImage2D = (PFNGLTEXIMAGE2DPROC)GetProcAddress(opengl32, "glTexImage2D");
+    _glTexParameteri = (PFNGLTEXPARAMETERIPROC)GetProcAddress(opengl32, "glTexParameteri");
+    _glViewport = (PFNGLVIEWPORTPROC)GetProcAddress(opengl32, "glViewport");
+    _glClear = (PFNGLCLEARPROC)GetProcAddress(opengl32, "glClear");
+    _glReadPixels = (PFNGLREADPIXELSPROC)GetProcAddress(opengl32, "glReadPixels");
+    _glGetString = (PFNGLGETSTRINGPROC)GetProcAddress(opengl32, "glGetString");
+    _glGetError = (PFNGLGETERRORPROC)GetProcAddress(opengl32, "glGetError");
+
+    LOG("loadGLFunctions: opengl32=%p", opengl32);
+    LOG("  glGenTextures=%p, glBindTexture=%p, glTexImage2D=%p", (void*)_glGenTextures, (void*)_glBindTexture, (void*)_glTexImage2D);
+    LOG("  glViewport=%p, glClear=%p, glReadPixels=%p", (void*)_glViewport, (void*)_glClear, (void*)_glReadPixels);
+    LOG("  glGenFramebuffers=%p, glCheckFramebufferStatus=%p", (void*)_glGenFramebuffers, (void*)_glCheckFramebufferStatus);
 }
 
 #elif !defined(__APPLE__)
@@ -320,7 +361,7 @@ bool render_context_t::initOpenGL() {
     wglMakeCurrent(data->hdc, data->hglrc);
 
     // Load GL extension functions
-    loadGLFunctions();
+    loadGLFunctions(data->opengl32);
 
     gl_context_ = data;
     gl_display_ = nullptr;
@@ -427,7 +468,7 @@ bool render_context_t::initOpenGLWithExistingHwnd(void *hwnd) {
     }
     wglMakeCurrent(data->hdc, data->hglrc);
 
-    loadGLFunctions();
+    loadGLFunctions(data->opengl32);
 
     gl_context_ = data;
     gl_display_ = nullptr;
@@ -464,62 +505,94 @@ void render_context_t::cleanupOpenGL() {
 }
 
 bool render_context_t::createFramebuffer() {
-    glGenFramebuffers(1, &fbo_);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    if (!_glGenTextures || !_glBindTexture || !_glTexImage2D || !_glTexParameteri) {
+        LOG("createFramebuffer: core GL functions not loaded");
+        return false;
+    }
 
-    glGenTextures(1, &texture_);
-    glBindTexture(GL_TEXTURE_2D, texture_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width_, height_, 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture_, 0);
+    _glGenFramebuffers(1, &fbo_);
+    _glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
 
-    glGenRenderbuffers(1, &rbo_);
-    glBindRenderbuffer(GL_RENDERBUFFER, rbo_);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width_, height_);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rbo_);
+    _glGenTextures(1, &texture_);
+    if (!texture_) {
+        LOG("createFramebuffer: _glGenTextures returned 0");
+        destroyFramebuffer();
+        return false;
+    }
 
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+    _glBindTexture(GL_TEXTURE_2D, texture_);
+    _glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    _glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    _glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    _glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture_, 0);
+
+    _glGenRenderbuffers(1, &rbo_);
+    _glBindRenderbuffer(GL_RENDERBUFFER, rbo_);
+    _glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width_, height_);
+    _glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rbo_);
+
+    if (_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         LOG("Framebuffer not complete");
         destroyFramebuffer();
         return false;
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    _glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    LOG("createFramebuffer: OK - fbo_=%u, texture_=%u, rbo_=%u", fbo_, texture_, rbo_);
     return true;
 }
 
 void render_context_t::destroyFramebuffer() {
-    if (fbo_) {
-        glDeleteFramebuffers(1, &fbo_);
+    if (fbo_ && _glDeleteFramebuffers) {
+        _glDeleteFramebuffers(1, &fbo_);
         fbo_ = 0;
     }
-    if (texture_) {
-        glDeleteTextures(1, &texture_);
+    if (texture_ && _glDeleteTextures) {
+        _glDeleteTextures(1, &texture_);
         texture_ = 0;
     }
-    if (rbo_) {
-        glDeleteRenderbuffers(1, &rbo_);
+    if (rbo_ && _glDeleteRenderbuffers) {
+        _glDeleteRenderbuffers(1, &rbo_);
         rbo_ = 0;
     }
 }
 
 bool render_context_t::render() {
-    if (!render_ctx_ || !fbo_) return false;
+    if (!render_ctx_ || !fbo_) {
+        LOG("render(): render_ctx_=%p, fbo_=%u — returning false", render_ctx_, fbo_);
+        return false;
+    }
+
+    static int render_log_count = 0;
+    render_log_count++;
+    if (render_log_count <= 3) {
+        LOG("render(): fbo_=%u, texture_=%u, rbo_=%u, width_=%d, height_=%d", fbo_, texture_, rbo_, width_, height_);
+    }
 
     // 确保 OpenGL 上下文在当前线程激活（render 可能在不同于创建时的线程调用）
 #if defined(_WIN32) || defined(_WIN64)
     if (gl_context_) {
         auto *data = static_cast<PlatformGLData*>(gl_context_);
         if (data->hdc && data->hglrc) {
-            wglMakeCurrent(data->hdc, data->hglrc);
+            BOOL ok = wglMakeCurrent(data->hdc, data->hglrc);
+            if (!ok) {
+                DWORD err = GetLastError();
+                LOG("render(): wglMakeCurrent failed, error=0x%lX", err);
+                return false;
+            }
+        } else {
+            LOG("render(): hdc=%p, hglrc=%p — missing context", data->hdc, data->hglrc);
+            return false;
         }
+    } else {
+        LOG("render(): gl_context_ is null");
+        return false;
     }
 #endif
 
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
-    glViewport(0, 0, width_, height_);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    _glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    _glViewport(0, 0, width_, height_);
+    _glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     mpv_opengl_fbo fbo_params = {
         .fbo = static_cast<int>(fbo_),
@@ -538,28 +611,113 @@ bool render_context_t::render() {
     int result = mpv_render_context_render(render_ctx_, params);
     if (result < 0) {
         LOG("mpv_render_context_render failed: %d", result);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        _glBindFramebuffer(GL_FRAMEBUFFER, 0);
         return false;
     }
 
-    // Read pixels
-    glReadPixels(0, 0, width_, height_, GL_BGRA, GL_UNSIGNED_BYTE, pixel_buffer_);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    // Debug: check first few pixels
-    static int render_count = 0;
-    render_count++;
-    if (render_count <= 5 || render_count % 300 == 0) {
-        bool has_content = false;
-        int check_size = (width_ * height_ * 4 < 4000) ? width_ * height_ * 4 : 4000;
-        for (int i = 0; i < check_size; i++) {
-            if (pixel_buffer_[i] != 0) { has_content = true; break; }
-        }
-        uint32_t first_pixel = *(uint32_t*)pixel_buffer_;
-        LOG("render #%d: result=%d, first_pixel=0x%08X, has_content=%d", render_count, result, first_pixel, has_content);
+    // Read pixels for SW fallback path (also used for debug validation)
+    if (pixel_buffer_ && _glReadPixels) {
+        _glReadPixels(0, 0, width_, height_, GL_BGRA, GL_UNSIGNED_BYTE, pixel_buffer_);
     }
 
+    _glBindFramebuffer(GL_FRAMEBUFFER, 0);
     return true;
+}
+
+void *render_context_t::createSharedGLContext() {
+#if defined(_WIN32) || defined(_WIN64)
+    if (!gl_context_) return nullptr;
+    auto *data = static_cast<PlatformGLData*>(gl_context_);
+    if (!data->hglrc) return nullptr;
+
+    // Return mpv's HGLRC — the caller (nSetupGlContext) will create a context
+    // on the target window's HDC that shares resources with this context.
+    return data->hglrc;
+#else
+    return nullptr;
+#endif
+}
+
+void *render_context_t::getHDC() const {
+#if defined(_WIN32) || defined(_WIN64)
+    if (!gl_context_) return nullptr;
+    auto *data = static_cast<PlatformGLData*>(gl_context_);
+    return data->hdc;
+#else
+    return nullptr;
+#endif
+}
+
+void render_context_t::finishRender() {
+#if defined(_WIN32) || defined(_WIN64)
+    // Ensure mpv's GPU rendering is complete before shared context reads the texture
+    glFinish();
+#endif
+}
+
+unsigned int render_context_t::copyToNewTexture(int *outWidth, int *outHeight) {
+    if (!texture_) {
+        LOG("copyToNewTexture: texture_ is null");
+        return 0;
+    }
+
+    if (!_glGenTextures || !_glBindTexture || !_glTexImage2D || !_glTexParameteri || !_glDeleteTextures) {
+        LOG("copyToNewTexture: core GL functions not loaded");
+        return 0;
+    }
+
+    *outWidth = width_;
+    *outHeight = height_;
+
+    // Load glCopyImageSubData (OpenGL 4.3+)
+    typedef void (APIENTRY *PFNGLCOPYIMAGESUBDATAPROC)(
+        GLuint, GLenum, GLint, GLint, GLint, GLint,
+        GLuint, GLenum, GLint, GLint, GLint, GLint,
+        GLsizei, GLsizei, GLsizei);
+    static PFNGLCOPYIMAGESUBDATAPROC _glCopyImageSubData = nullptr;
+    if (!_glCopyImageSubData) {
+        _glCopyImageSubData = (PFNGLCOPYIMAGESUBDATAPROC)wglGetProcAddress("glCopyImageSubData");
+        if (!_glCopyImageSubData) {
+            LOG("copyToNewTexture: glCopyImageSubData not available");
+            return 0;
+        }
+    }
+
+    // Create a new GL texture for Skia to adopt
+    unsigned int newTexture = 0;
+    _glGenTextures(1, &newTexture);
+    if (!newTexture) {
+        LOG("copyToNewTexture: _glGenTextures returned 0");
+        return 0;
+    }
+
+    _glBindTexture(GL_TEXTURE_2D, newTexture);
+    _glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    _glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    _glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    // Copy mpv's FBO texture to the new texture (GPU-side, fast)
+    _glCopyImageSubData(
+        texture_, GL_TEXTURE_2D, 0, 0, 0, 0,
+        newTexture, GL_TEXTURE_2D, 0, 0, 0, 0,
+        width_, height_, 1
+    );
+
+    // Check for GL errors
+    GLenum err = _glGetError ? _glGetError() : 0;
+    if (err != GL_NO_ERROR) {
+        LOG("copyToNewTexture: glCopyImageSubData error: 0x%X (src=%u, dst=%u)", err, texture_, newTexture);
+        _glDeleteTextures(1, &newTexture);
+        return 0;
+    }
+
+    _glBindTexture(GL_TEXTURE_2D, 0);
+    static int copy_count = 0;
+    copy_count++;
+    if (copy_count <= 3 || copy_count % 300 == 0) {
+        LOG("copyToNewTexture: SUCCESS #%d, newTexture=%u", copy_count, newTexture);
+    }
+    return newTexture;
 }
 
 bool render_context_t::resize(int width, int height) {

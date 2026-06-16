@@ -69,9 +69,6 @@ actual class MpvMediampPlayer (
 
     override val impl: MPVHandle get() = handle
 
-    /** Windows 上使用 vo=gpu + D3D11 直接渲染到原生窗口（需要 SwingPanel） */
-    val isGpuRenderMode: Boolean = false // 暂时禁用 D3D11，使用 VLC-style SW 渲染
-
     override val currentPositionMillis: MutableStateFlow<Long> = MutableStateFlow(0L)
     
     override val mediaProperties: MutableStateFlow<MediaProperties?> = MutableStateFlow(null)
@@ -95,15 +92,8 @@ actual class MpvMediampPlayer (
 
         handle.option("config", "no")
 
-        if (isGpuRenderMode) {
-            // Windows: 使用 vo=gpu + D3D11，mpv 直接渲染到原生窗口
-            handle.option("vo", "gpu")
-            handle.option("gpu-api", "d3d11")
-            handle.option("gpu-context", "d3d11")
-        } else {
-            // 非 Windows 或 SW fallback: 使用 vo=libmpv，由 render context 驱动渲染
-            handle.option("vo", "libmpv")
-        }
+        // 使用 vo=libmpv，由 render context (ANGLE/SW) 驱动渲染
+        handle.option("vo", "libmpv")
 
         when (currentPlatform()) {
             is Platform.Android -> {
@@ -137,9 +127,16 @@ actual class MpvMediampPlayer (
         handle.initialize()
 
         // 创建渲染上下文（在 mpv_initialize 之后，loadfile 之前）
-        if (!isGpuRenderMode && currentPlatform() !is Platform.Android) {
-            // SW fallback：使用 vo=libmpv + render context
-            handle.createSwRenderContext(1920, 1080)
+        if (currentPlatform() !is Platform.Android) {
+            // 桌面端优先使用 ANGLE 渲染上下文（D3D11 GPU 加速 + staging texture 像素回读）
+            // 回退到 SW 渲染上下文（CPU 渲染 + DirectByteBuffer）
+            val angleCreated = handle.createAngleRenderContext(1920, 1080)
+            if (angleCreated) {
+                println("[MPV] ANGLE render context created successfully")
+            } else {
+                println("[MPV] ANGLE not available, falling back to SW render context")
+                handle.createSwRenderContext(1920, 1080)
+            }
         }
 
         handle.observeProperty("time-pos/full", MPVFormat.MPV_FORMAT_INT64)
@@ -158,10 +155,23 @@ actual class MpvMediampPlayer (
     fun attachRenderSurface(surface: Any): Boolean {
         return attachSurface(handle.ptr, surface)
     }
-    
+
     @InternalMediampApi
     fun detachRenderSurface(): Boolean {
         return detachSurface(handle.ptr)
+    }
+
+    /**
+     * 创建与 mpv 共享的 GL 上下文（GPU 纹理直出路径）。
+     * 传入 Skia 的 HDC 和 mpv 的 HGLRC，创建一个在 Skia HDC 上下文的新 HGLRC，
+     * 该 HGLRC 与 mpv 的 HGLRC 共享 GL 对象（纹理、FBO 等）。
+     *
+     * @param hdc Skia 的 HDC（从 WindowsOpenGLRedrawer.device 反射获取）
+     * @param mpvHglrc mpv 的 HGLRC（从 createGlSharedContext 获取）
+     */
+    @InternalMediampApi
+    fun setupGlSharedContext(mpvHglrc: Long): Boolean {
+        return MPVHandle.setupGlContextWithHandles(handle.ptr, mpvHglrc)
     }
 
     override suspend fun setMediaDataImpl(data: MediaData): MPVPlayerData {
@@ -263,10 +273,13 @@ actual class MpvMediampPlayer (
     
 
     override fun closeImpl() {
-        handle.command("stop")
+        // Stop playback first (may be no-op if already stopped)
+        try { handle.command("stop") } catch (_: Exception) {}
+        handle.destroyAngleRenderContext()
+        handle.destroyGlRenderContext()
+        handle.destroySwRenderContext()
         handle.destroy()
         handle.close()
-        
     }
     
     companion object

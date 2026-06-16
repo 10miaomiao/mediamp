@@ -181,6 +181,52 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         return nGetGlHeight(ptr)
     }
 
+    // GL shared context (for GPU texture export to Skia)
+
+    /**
+     * Create a shared WGL context from mpv's GL context.
+     * Returns an opaque handle (HGLRC) that can be made current on another thread
+     * to access mpv's GL resources (textures, FBOs) via wglShareLists.
+     * Returns 0 on failure.
+     */
+    fun createGlSharedContext(): Long {
+        return nCreateGlSharedContext(ptr)
+    }
+
+    /**
+     * Copy mpv's current FBO texture to a NEW GL texture.
+     * Returns the new texture ID (Skia will take ownership via adoptTextureFrom).
+     * Must be called on the render thread with the shared GL context current.
+     * mpv must have already called renderGlFrame() + finishGlRender() before this.
+     * outSize must be IntArray(2) to receive [width, height].
+     * Returns 0 on failure.
+     */
+    fun copyGlTextureToNew(outSize: IntArray): Int {
+        return nCopyGlTextureToNew(ptr, outSize)
+    }
+
+    /**
+     * Wait for the GPU to finish mpv's last render (glFinish).
+     * Call from the mpv render thread after renderGlFrame().
+     */
+    fun finishGlRender() {
+        nFinishGlRender(ptr)
+    }
+
+    /**
+     * Check if GL render context is available (created successfully).
+     */
+    fun isGlAvailable(): Boolean {
+        return nIsGlAvailable(ptr)
+    }
+
+    /**
+     * Get the GL FBO ID of mpv's render context (for Skia BackendRenderTarget).
+     */
+    fun getGlFboId(): Int {
+        return nGetGlFboId(ptr)
+    }
+
     // ANGLE render context (GPU-accelerated via D3D11)
 
     fun createAngleRenderContext(width: Int, height: Int): Boolean {
@@ -216,6 +262,29 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
     }
 
     /**
+     * Get the shared HANDLE of the ANGLE D3D11 texture (for cross-API GPU import).
+     * Returns 0 if not using shared texture path.
+     */
+    fun getAngleSharedTextureHandle(): Long {
+        return nGetAngleSharedTextureHandle(ptr)
+    }
+
+    /**
+     * Get the ANGLE D3D11 device pointer (for direct texture access).
+     */
+    fun getAngleD3D11Device(): Long {
+        return nGetAngleD3D11Device(ptr)
+    }
+
+    /**
+     * Read pixels directly from the ANGLE D3D11 shared texture (bypasses glReadPixels).
+     * Returns true on success, with width/height written to outSize.
+     */
+    fun readPixelsFromSharedTexture(outArray: ByteArray, outSize: IntArray): Boolean {
+        return nReadPixelsFromSharedTexture(ptr, outArray, outSize)
+    }
+
+    /**
      * Stop this `mpv_context` instance, which will run into the unrecoverable state.
      *
      * You will not expected to call any method except [close] after calling this function.
@@ -240,6 +309,40 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
 
         public fun useDefaultRuntimeLibraryDirectory() {
             LibraryLoader.useDefaultRuntimeLibraryDirectory()
+        }
+
+        // WGL context management (GPU texture export)
+
+        public fun setupGlContext(component: Any, hglrc: Long): Boolean {
+            return nSetupGlContext(component, hglrc)
+        }
+
+        public fun setupGlContextWithHandles(mpvPtr: Long, mpvHglrc: Long): Boolean {
+            return nSetupGlContextWithHandles(mpvPtr, mpvHglrc)
+        }
+
+        public fun makeContextCurrent(): Boolean {
+            return nMakeContextCurrent()
+        }
+
+        public fun destroyWglContext(hglrc: Long) {
+            nDestroyWglContext(hglrc)
+        }
+
+        public fun swapBuffers() {
+            nSwapBuffers()
+        }
+
+        public fun wglSwapIntervalEXT(interval: Int) {
+            nWglSwapIntervalEXT(interval)
+        }
+
+        public fun deleteGlTexture(textureId: Int) {
+            nDeleteGlTexture(textureId)
+        }
+
+        public fun openSharedTextureOnD3D12(d3d12DevicePtr: Long, sharedHandle: Long): Long {
+            return nOpenSharedTextureOnD3D12(d3d12DevicePtr, sharedHandle)
         }
     }
 
@@ -324,6 +427,22 @@ private external fun nCopyGlPixels(ptr: Long, outArray: ByteArray, outSize: IntA
 private external fun nGetGlWidth(ptr: Long): Int
 private external fun nGetGlHeight(ptr: Long): Int
 
+// GL shared context native methods (for GPU texture export to Skia)
+private external fun nCreateGlSharedContext(ptr: Long): Long
+private external fun nCopyGlTextureToNew(ptr: Long, outSize: IntArray): Int
+private external fun nFinishGlRender(ptr: Long)
+private external fun nIsGlAvailable(ptr: Long): Boolean
+private external fun nGetGlFboId(ptr: Long): Int
+
+// WGL context management for GPU texture export
+private external fun nSetupGlContext(component: Any, hglrc: Long): Boolean
+private external fun nSetupGlContextWithHandles(hdc: Long, mpvHglrc: Long): Boolean
+private external fun nMakeContextCurrent(): Boolean
+private external fun nDestroyWglContext(hglrc: Long)
+private external fun nSwapBuffers()
+private external fun nWglSwapIntervalEXT(interval: Int)
+private external fun nDeleteGlTexture(textureId: Int)
+
 // ANGLE render context native methods (GPU-accelerated via D3D11)
 private external fun nCreateAngleRenderContext(ptr: Long, width: Int, height: Int): Boolean
 private external fun nResizeAngleRenderContext(ptr: Long, width: Int, height: Int): Boolean
@@ -333,6 +452,12 @@ private external fun nCopyAnglePixels(ptr: Long, outArray: ByteArray, outSize: I
 private external fun nGetAngleWidth(ptr: Long): Int
 private external fun nGetAngleHeight(ptr: Long): Int
 private external fun nIsAngleAvailable(ptr: Long): Boolean
+private external fun nGetAngleSharedTextureHandle(ptr: Long): Long
+private external fun nGetAngleD3D11Device(ptr: Long): Long
+private external fun nReadPixelsFromSharedTexture(ptr: Long, outArray: ByteArray, outSize: IntArray): Boolean
+
+// D3D12 interop: open shared HANDLE on a D3D12 device
+private external fun nOpenSharedTextureOnD3D12(d3d12DevicePtr: Long, sharedHandle: Long): Long
 
 private external fun nDestroy(ptr: Long): Boolean
 private external fun nFinalize(ptr: Long)

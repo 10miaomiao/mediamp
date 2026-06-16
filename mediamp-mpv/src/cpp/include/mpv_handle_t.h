@@ -67,6 +67,14 @@ public:
     int get_gl_width() const;
     int get_gl_height() const;
 
+    // GL shared context (for GPU texture export to Skia)
+    void *create_gl_shared_context();
+    void *get_gl_hdc();
+    unsigned int copy_gl_texture_to_new(int *outWidth, int *outHeight);
+    void finish_gl_render();
+    bool is_gl_available() const { return gl_render_ctx_ != nullptr; }
+    unsigned int get_gl_fbo_id() const;
+
     // ANGLE render context (GPU-accelerated via D3D11)
     bool create_angle_render_context(int width, int height);
     bool resize_angle_render_context(int width, int height);
@@ -76,6 +84,9 @@ public:
     int get_angle_width() const;
     int get_angle_height() const;
     bool is_angle_available() const;
+    void *get_angle_shared_texture_handle() const;
+    void *get_angle_d3d11_device() const;
+    bool read_angle_pixels(uint8_t *out, int out_size, int *out_width, int *out_height);
 
 private:
     JavaVM *jvm_;

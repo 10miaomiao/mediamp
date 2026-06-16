@@ -470,6 +470,14 @@ bool mpv_handle_t::create_gl_render_context(int width, int height) {
         return false;
     }
 
+    // Release the GL context from this thread so it can be shared via
+    // wglCreateContextAttribsARB on another thread (the render thread).
+    // wglShareLists / wglCreateContextAttribsARB requires the share context
+    // to NOT be current on any thread.
+#if defined(_WIN32) || defined(_WIN64)
+    wglMakeCurrent(nullptr, nullptr);
+#endif
+
     LOG("GL render context created: %dx%d", width, height);
     return true;
 }
@@ -508,6 +516,32 @@ int mpv_handle_t::get_gl_width() const {
 
 int mpv_handle_t::get_gl_height() const {
     return gl_render_ctx_ ? gl_render_ctx_->getHeight() : 0;
+}
+
+// GL shared context (for GPU texture export to Skia)
+
+void *mpv_handle_t::create_gl_shared_context() {
+    if (!gl_render_ctx_) return nullptr;
+    return gl_render_ctx_->createSharedGLContext();
+}
+
+void *mpv_handle_t::get_gl_hdc() {
+    if (!gl_render_ctx_) return nullptr;
+    return gl_render_ctx_->getHDC();
+}
+
+unsigned int mpv_handle_t::copy_gl_texture_to_new(int *outWidth, int *outHeight) {
+    if (!gl_render_ctx_) return 0;
+    return gl_render_ctx_->copyToNewTexture(outWidth, outHeight);
+}
+
+void mpv_handle_t::finish_gl_render() {
+    if (gl_render_ctx_) gl_render_ctx_->finishRender();
+}
+
+unsigned int mpv_handle_t::get_gl_fbo_id() const {
+    if (!gl_render_ctx_) return 0;
+    return gl_render_ctx_->getFboId();
 }
 
 // ANGLE render context (GPU-accelerated via D3D11)
@@ -566,16 +600,7 @@ void mpv_handle_t::destroy_angle_render_context() {
 
 bool mpv_handle_t::copy_angle_pixels(uint8_t *out, int out_size, int *out_width, int *out_height) {
     if (!angle_render_ctx_) return false;
-    int w = angle_render_ctx_->getWidth();
-    int h = angle_render_ctx_->getHeight();
-    int size = w * h * 4;
-    if (out_size < size) return false;
-    const uint8_t *pixels = angle_render_ctx_->getPixelBuffer();
-    if (!pixels) return false;
-    memcpy(out, pixels, size);
-    *out_width = w;
-    *out_height = h;
-    return true;
+    return angle_render_ctx_->readPixels(out, out_size, out_width, out_height);
 }
 
 int mpv_handle_t::get_angle_width() const {
@@ -588,6 +613,18 @@ int mpv_handle_t::get_angle_height() const {
 
 bool mpv_handle_t::is_angle_available() const {
     return angle_render_ctx_ != nullptr;
+}
+
+void *mpv_handle_t::get_angle_shared_texture_handle() const {
+    return angle_render_ctx_ ? angle_render_ctx_->getSharedTextureHandle() : nullptr;
+}
+
+void *mpv_handle_t::get_angle_d3d11_device() const {
+    return angle_render_ctx_ ? (void*)angle_render_ctx_->getD3D11Device() : nullptr;
+}
+
+bool mpv_handle_t::read_angle_pixels(uint8_t *out, int out_size, int *out_width, int *out_height) {
+    return angle_render_ctx_ ? angle_render_ctx_->readPixels(out, out_size, out_width, out_height) : false;
 }
 
 bool mpv_handle_t::destroy(JNIEnv *env) {

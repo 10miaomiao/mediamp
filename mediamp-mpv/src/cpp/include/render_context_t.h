@@ -37,6 +37,31 @@ public:
     // 获取隐藏窗口的 HWND（用于设置 mpv 的 wid 选项）
     void *getHiddenWindowHandle() const;
 
+    // GPU texture export: create a shared WGL context from mpv's context.
+    // The shared context can be made current on another thread (e.g. Skia render thread)
+    // to access mpv's GL resources (textures, FBOs) via wglShareLists.
+    // Returns opaque handle to the shared context (HGLRC), or nullptr on failure.
+    void *createSharedGLContext();
+
+    // Copy mpv's current FBO texture to a NEW GL texture.
+    // Must be called on the render thread with the shared context current.
+    // mpv must have already called render() + finishRender() before this.
+    // Returns the new texture ID (owned by caller — Skia will delete via adoptTextureFrom).
+    unsigned int copyToNewTexture(int *outWidth, int *outHeight);
+
+    // Wait for the GPU to finish mpv's last render (glFinish on mpv's context).
+    // Call this from the mpv render thread after render().
+    void finishRender();
+
+    // Get the GL texture ID of mpv's FBO (for shared context access).
+    unsigned int getTextureId() const { return texture_; }
+
+    // Get the GL FBO ID (for Skia BackendRenderTarget).
+    unsigned int getFboId() const { return fbo_; }
+
+    // Get mpv's HDC (for creating shared GL context on the same device).
+    void *getHDC() const;
+
 private:
     mpv_handle *mpv_;
     mpv_render_context *render_ctx_ = nullptr;

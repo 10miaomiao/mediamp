@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
-MPV_INSTALL="D:/MyCode/AndroidStudioProjects/mediamp/mediamp-mpv/build/mpv/WindowsX64/install"
+# Use MSYS2 UCRT64 pre-built mpv (installed via: pacman -S mingw-w64-ucrt-x86_64-mpv)
+MPV_INSTALL="/ucrt64"
 SRC_DIR="D:/MyCode/AndroidStudioProjects/mediamp/mediamp-mpv/src/cpp"
 OUT_DLL="D:/MyCode/AndroidStudioProjects/mediamp/mediamp-mpv/build/mpv/WindowsX64/jni/mediampv.dll"
 
