@@ -150,23 +150,14 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                     if (!running) break
 
                     if (useAngle) {
-                        // ANGLE 同步回读：render + readPixels
-                        val t0 = System.nanoTime()
-                        val rendered = handle.renderAngleFrame()
-                        val renderMs = (System.nanoTime() - t0) / 1_000_000
-                        if (rendered) {
-                            lastRenderMs = renderMs
-                            renderedFrames++
-                            successfulRenders++
-
-                            // 同步回读像素（CopyResource + Map）
+                        // ANGLE 异步流水线回读：
+                        // 1. 取回上一帧的像素（非阻塞，GPU拷贝早已完成）
+                        if (readbackPending) {
                             val tRead = System.nanoTime()
-                            val readOk = handle.readPixelsFromSharedTexture(frameBytes, sizeOut)
+                            val readOk = handle.getReadPixelsResult(frameBytes, sizeOut)
                             val readMs = (System.nanoTime() - tRead) / 1_000_000
-                            if (loopCount <= 20 || loopCount % 100 == 0) {
-                                println("[Render] Loop #$loopCount: render=${renderMs}ms, readPixels=${readMs}ms")
-                            }
                             if (readOk) {
+                                readbackPending = false
                                 val w = sizeOut[0]
                                 val h = sizeOut[1]
                                 val neededSize = w * h * 4
@@ -181,6 +172,30 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                                         bitmapState.value = skiaBitmap.asComposeImageBitmap()
                                     }
                                 }
+                                if (loopCount <= 20 || loopCount % 100 == 0) {
+                                    println("[Render] Loop #$loopCount: async readPixels=${readMs}ms")
+                                }
+                            } else {
+                                readbackPending = false
+                            }
+                        }
+
+                        // 2. 渲染新帧（ANGLE GL render + eglWaitClient + swap double-buffer）
+                        val t0 = System.nanoTime()
+                        val rendered = handle.renderAngleFrame()
+                        val renderMs = (System.nanoTime() - t0) / 1_000_000
+
+                        if (rendered) {
+                            lastRenderMs = renderMs
+                            renderedFrames++
+                            successfulRenders++
+
+                            // 3. 启动异步回读（非阻塞 CopyResource）
+                            handle.beginReadPixels()
+                            readbackPending = true
+
+                            if (loopCount <= 20 || loopCount % 100 == 0) {
+                                println("[Render] Loop #$loopCount: render=${renderMs}ms, async readback started")
                             }
                         } else {
                             skippedFrames++
@@ -272,25 +287,6 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
             isDaemon = true
             start()
         }
-    }
-
-    /**
-     * ANGLE path: render ANGLE frame, then read pixels via D3D11 staging texture.
-     * Returns true if a frame was rendered successfully.
-     */
-    private fun renderAngleFrame(handle: org.openani.mediamp.mpv.MPVHandle): Boolean {
-        if (!handle.renderAngleFrame()) return false
-
-        val w = currentRenderW
-        val h = currentRenderH
-        val neededSize = w * h * 4
-        if (frameBytes.size < neededSize) {
-            frameBytes = ByteArray(neededSize)
-        }
-
-        // Read pixels from D3D11 shared texture via staging texture (fast, ~5ms for 1080p)
-        if (!handle.readPixelsFromSharedTexture(frameBytes, sizeOut)) return false
-        return true
     }
 
     /**
