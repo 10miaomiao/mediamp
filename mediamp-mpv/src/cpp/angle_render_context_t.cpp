@@ -447,7 +447,8 @@ bool angle_render_context_t::render() {
             .internal_format = GL_RGBA8,
         };
 
-        int flip_y = 1;
+        // flip_y=0: D3D11 textures are top-down, no need for mpv to flip Y
+        int flip_y = 0;
         mpv_render_param params[] = {
             {MPV_RENDER_PARAM_OPENGL_FBO, &fbo_params},
             {MPV_RENDER_PARAM_FLIP_Y, &flip_y},
@@ -463,7 +464,7 @@ bool angle_render_context_t::render() {
             LOG("render: mpv_render_context_render succeeded, frame #%d", render_call_count);
         }
 
-        // Ensure D3D11 GPU operations complete before D3D12 reads
+        // glFlush submits GL commands; eglWaitClient ensures GPU finishes before readback CopyResource
         glFlush();
         eglWaitClient();
 
@@ -608,6 +609,12 @@ void angle_render_context_t::releaseReadbackCache() {
         staging_texture_->Release();
         staging_texture_ = nullptr;
     }
+    for (int i = 0; i < 2; i++) {
+        if (async_staging_[i]) {
+            async_staging_[i]->Release();
+            async_staging_[i] = nullptr;
+        }
+    }
     if (readback_ctx_) {
         readback_ctx_->Release();
         readback_ctx_ = nullptr;
@@ -618,6 +625,115 @@ void angle_render_context_t::releaseReadbackCache() {
     }
     staging_width_ = 0;
     staging_height_ = 0;
+    async_staging_width_ = 0;
+    async_staging_height_ = 0;
+    async_pending_ = false;
+}
+
+bool angle_render_context_t::beginReadPixels() {
+    if (!use_shared_texture_ || !d3d11_device_) return false;
+
+    // Lazily create readback device
+    if (!readback_device_) {
+        D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_0 };
+        D3D_FEATURE_LEVEL obtainedLevel;
+        HRESULT hr = D3D11CreateDevice(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+            0, featureLevels, 1,
+            D3D11_SDK_VERSION,
+            &readback_device_, &obtainedLevel, &readback_ctx_);
+        if (FAILED(hr) || !readback_device_) {
+            LOG("beginReadPixels: Failed to create readback device, hr=0x%lX", hr);
+            return false;
+        }
+        LOG("beginReadPixels: Created D3D11 readback device");
+    }
+
+    int read_idx = read_idx_;
+    void *sharedHandle = shared_handles_[read_idx];
+    if (!sharedHandle) return false;
+
+    // Open shared texture on readback device (cached)
+    if (!cached_shared_textures_[read_idx]) {
+        HRESULT hr = readback_device_->OpenSharedResource(
+            sharedHandle, __uuidof(ID3D11Texture2D), (void**)&cached_shared_textures_[read_idx]);
+        if (FAILED(hr) || !cached_shared_textures_[read_idx]) {
+            LOG("beginReadPixels: OpenSharedResource failed, hr=0x%lX", hr);
+            return false;
+        }
+    }
+    ID3D11Texture2D *src = cached_shared_textures_[read_idx];
+
+    // Create/recreate async staging textures if size changed
+    if (async_staging_width_ != width_ || async_staging_height_ != height_) {
+        for (int i = 0; i < 2; i++) {
+            if (async_staging_[i]) {
+                async_staging_[i]->Release();
+                async_staging_[i] = nullptr;
+            }
+        }
+        D3D11_TEXTURE2D_DESC desc;
+        src->GetDesc(&desc);
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.MiscFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        for (int i = 0; i < 2; i++) {
+            HRESULT hr = readback_device_->CreateTexture2D(&desc, nullptr, &async_staging_[i]);
+            if (FAILED(hr) || !async_staging_[i]) {
+                LOG("beginReadPixels: CreateTexture2D staging[%d] failed, hr=0x%lX", i, hr);
+                return false;
+            }
+        }
+        async_staging_width_ = width_;
+        async_staging_height_ = height_;
+        async_pending_ = false;
+    }
+
+    // Non-blocking GPU copy to current staging texture
+    readback_ctx_->CopyResource(async_staging_[async_write_idx_], src);
+    async_pending_ = true;
+    return true;
+}
+
+bool angle_render_context_t::getReadPixelsResult(uint8_t *out, int out_size, int *out_width, int *out_height) {
+    if (!async_pending_) return false;
+
+    // Map the PREVIOUS staging texture (data is ready after one render cycle)
+    int prev_idx = 1 - async_write_idx_;
+    ID3D11Texture2D *staging = async_staging_[prev_idx];
+    if (!staging) return false;
+
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    HRESULT hr = readback_ctx_->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) {
+        LOG("getReadPixelsResult: Map failed, hr=0x%lX", hr);
+        return false;
+    }
+
+    int w = async_staging_width_;
+    int h = async_staging_height_;
+    int needed = w * h * 4;
+    if (out_size < needed || w <= 0 || h <= 0) {
+        readback_ctx_->Unmap(staging, 0);
+        return false;
+    }
+
+    uint8_t *src_ptr = (uint8_t*)mapped.pData;
+    int rowBytes = w * 4;
+    for (int row = 0; row < h; row++) {
+        memcpy(out + row * rowBytes, src_ptr + row * mapped.RowPitch, rowBytes);
+    }
+
+    *out_width = w;
+    *out_height = h;
+
+    readback_ctx_->Unmap(staging, 0);
+
+    // Advance staging buffer index for next beginReadPixels call
+    async_write_idx_ = prev_idx;
+    async_pending_ = false;
+    return true;
 }
 
 bool angle_render_context_t::resize(int width, int height) {
@@ -626,6 +742,7 @@ bool angle_render_context_t::resize(int width, int height) {
 
     width_ = width;
     height_ = height;
+    async_pending_ = false;
 
     if (use_shared_texture_) {
         destroySharedTextures();

@@ -104,6 +104,8 @@ extern "C" {
     JNIEXPORT jlong JNICALL FN(nGetAngleSharedTextureHandle)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT jlong JNICALL FN(nGetAngleD3D11Device)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT jboolean JNICALL FN(nReadPixelsFromSharedTexture)(JNIEnv *env, jclass clazz, jlong ptr, jbyteArray outArray, jintArray outSize);
+    JNIEXPORT jboolean JNICALL FN(nBeginReadPixels)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT jboolean JNICALL FN(nGetReadPixelsResult)(JNIEnv *env, jclass clazz, jlong ptr, jbyteArray outArray, jintArray outSize);
     JNIEXPORT jlong JNICALL FN(nOpenSharedTextureOnD3D12)(JNIEnv *env, jclass clazz, jlong d3d12DevicePtr, jlong sharedHandle);
 
 /**
@@ -1147,6 +1149,41 @@ JNIEXPORT jboolean JNICALL FN(nReadPixelsFromSharedTexture)(
     int dims[2] = {0, 0};
 
     bool ok = instance->read_angle_pixels((uint8_t*)dst, (int)arrayLen, &dims[0], &dims[1]);
+
+    env->ReleaseByteArrayElements(outArray, dst, ok ? 0 : JNI_ABORT);
+
+    if (ok) {
+        jint jdims[2] = { dims[0], dims[1] };
+        env->SetIntArrayRegion(outSize, 0, 2, jdims);
+    }
+    return ok;
+#else
+    return false;
+#endif
+}
+
+// Async readback: non-blocking CopyResource to staging texture
+JNIEXPORT jboolean JNICALL FN(nBeginReadPixels)(
+    JNIEnv *env, jclass clazz, jlong ptr) {
+#ifdef _WIN32
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    return instance->begin_read_pixels();
+#else
+    return false;
+#endif
+}
+
+// Async readback: map previous staging texture and copy to output (data already ready)
+JNIEXPORT jboolean JNICALL FN(nGetReadPixelsResult)(
+    JNIEnv *env, jclass clazz, jlong ptr, jbyteArray outArray, jintArray outSize) {
+#ifdef _WIN32
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+
+    jbyte *dst = env->GetByteArrayElements(outArray, nullptr);
+    jsize arrayLen = env->GetArrayLength(outArray);
+    int dims[2] = {0, 0};
+
+    bool ok = instance->get_read_pixels_result((uint8_t*)dst, (int)arrayLen, &dims[0], &dims[1]);
 
     env->ReleaseByteArrayElements(outArray, dst, ok ? 0 : JNI_ABORT);
 

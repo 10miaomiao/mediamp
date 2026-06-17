@@ -43,6 +43,12 @@ public:
     // Much faster than re-creating staging texture every frame.
     bool readPixels(uint8_t *out, int out_size, int *out_width, int *out_height);
 
+    // Async readback: split CopyResource and Map into two steps for pipelining.
+    // beginReadPixels() — non-blocking GPU copy to staging texture.
+    // getReadPixelsResult() — map previous staging texture (data already ready).
+    bool beginReadPixels();
+    bool getReadPixelsResult(uint8_t *out, int out_size, int *out_width, int *out_height);
+
     int getWidth() const { return width_; }
     int getHeight() const { return height_; }
 
@@ -85,9 +91,16 @@ private:
     ID3D11Device *readback_device_ = nullptr;
     ID3D11DeviceContext *readback_ctx_ = nullptr;
     ID3D11Texture2D *cached_shared_textures_[BUF_COUNT] = {};
-    ID3D11Texture2D *staging_texture_ = nullptr;
+    ID3D11Texture2D *staging_texture_ = nullptr;  // legacy sync staging (kept for readPixels compat)
     int staging_width_ = 0;
     int staging_height_ = 0;
+
+    // Async double-buffered staging textures for pipelined readback
+    ID3D11Texture2D *async_staging_[2] = {};
+    int async_staging_width_ = 0;
+    int async_staging_height_ = 0;
+    int async_write_idx_ = 0;   // which staging texture to CopyResource into
+    bool async_pending_ = false; // true if a CopyResource has been issued but not yet mapped
 
     bool initEGL();
     void cleanupEGL();

@@ -98,6 +98,9 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
     // Rendering mode
     private var useAngle = false
 
+    // Async readback pipeline state
+    private var readbackPending = false
+
     fun start() {
         if (running) return
         running = true
@@ -138,44 +141,87 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
             while (running) {
                 try {
                     loopCount++
-                    if (loopCount <= 5) println("[Render] Loop #$loopCount: waiting for frame...")
+                    val tWait = System.nanoTime()
                     handle.waitForFrame()
-                    if (loopCount <= 5) println("[Render] Loop #$loopCount: waitForFrame returned")
+                    val waitMs = (System.nanoTime() - tWait) / 1_000_000
+                    if (loopCount <= 20 || loopCount % 100 == 0) {
+                        println("[Render] Loop #$loopCount: waitForFrame=${waitMs}ms")
+                    }
                     if (!running) break
 
-                    if (loopCount <= 5) println("[Render] Loop #$loopCount: starting render, useAngle=$useAngle")
-                    val t0 = System.nanoTime()
-                    val rendered = if (useAngle) {
-                        renderAngleFrame(handle)
-                    } else {
-                        renderSwFrame(handle)
-                    }
-                    if (loopCount <= 5) println("[Render] Loop #$loopCount: rendered=$rendered, useAngle=$useAngle")
-                    if (rendered) {
-                        lastRenderMs = (System.nanoTime() - t0) / 1_000_000
-                        renderedFrames++
-                        successfulRenders++
+                    if (useAngle) {
+                        // ANGLE 同步回读：render + readPixels
+                        val t0 = System.nanoTime()
+                        val rendered = handle.renderAngleFrame()
+                        val renderMs = (System.nanoTime() - t0) / 1_000_000
+                        if (rendered) {
+                            lastRenderMs = renderMs
+                            renderedFrames++
+                            successfulRenders++
 
-                        val w = sizeOut[0]
-                        val h = sizeOut[1]
-                        val neededSize = w * h * 4
-                        if (neededSize <= 0 || w <= 0 || h <= 0) continue
-
-                        SwingUtilities.invokeLater {
-                            // Reuse Skia Bitmap if size unchanged
-                            if (w != lastImageW || h != lastImageH) {
-                                skiaBitmap.allocPixels(ImageInfo.makeN32Premul(w, h))
-                                lastImageW = w
-                                lastImageH = h
+                            // 同步回读像素（CopyResource + Map）
+                            val tRead = System.nanoTime()
+                            val readOk = handle.readPixelsFromSharedTexture(frameBytes, sizeOut)
+                            val readMs = (System.nanoTime() - tRead) / 1_000_000
+                            if (loopCount <= 20 || loopCount % 100 == 0) {
+                                println("[Render] Loop #$loopCount: render=${renderMs}ms, readPixels=${readMs}ms")
                             }
-                            skiaBitmap.installPixels(ImageInfo.makeN32Premul(w, h), frameBytes, w * 4)
-                            bitmapState.value = skiaBitmap.asComposeImageBitmap()
+                            if (readOk) {
+                                val w = sizeOut[0]
+                                val h = sizeOut[1]
+                                val neededSize = w * h * 4
+                                if (neededSize > 0 && w > 0 && h > 0) {
+                                    SwingUtilities.invokeLater {
+                                        if (w != lastImageW || h != lastImageH) {
+                                            skiaBitmap.allocPixels(ImageInfo.makeN32Premul(w, h))
+                                            lastImageW = w
+                                            lastImageH = h
+                                        }
+                                        skiaBitmap.installPixels(ImageInfo.makeN32Premul(w, h), frameBytes, w * 4)
+                                        bitmapState.value = skiaBitmap.asComposeImageBitmap()
+                                    }
+                                }
+                            }
+                        } else {
+                            skippedFrames++
                         }
+                    } else {
+                        // SW 路径：同步回读（不变）
+                        if (loopCount <= 5) println("[Render] Loop #$loopCount: starting SW render")
+                        val t0 = System.nanoTime()
+                        val rendered = renderSwFrame(handle)
+                        if (loopCount <= 5) println("[Render] Loop #$loopCount: rendered=$rendered")
+                        if (rendered) {
+                            lastRenderMs = (System.nanoTime() - t0) / 1_000_000
+                            renderedFrames++
+                            successfulRenders++
 
-                        // 在渲染成功后检查视频分辨率（避免在视频加载期间阻塞）
-                        // 只在成功渲染 MIN_FRAMES_FOR_RESOLUTION 帧后才查询
+                            val w = sizeOut[0]
+                            val h = sizeOut[1]
+                            val neededSize = w * h * 4
+                            if (neededSize <= 0 || w <= 0 || h <= 0) continue
+
+                            SwingUtilities.invokeLater {
+                                if (w != lastImageW || h != lastImageH) {
+                                    skiaBitmap.allocPixels(ImageInfo.makeN32Premul(w, h))
+                                    lastImageW = w
+                                    lastImageH = h
+                                }
+                                skiaBitmap.installPixels(ImageInfo.makeN32Premul(w, h), frameBytes, w * 4)
+                                bitmapState.value = skiaBitmap.asComposeImageBitmap()
+                            }
+                        } else {
+                            skippedFrames++
+                        }
+                    }
+
+                    // 视频分辨率检查（ANGLE 和 SW 共用）
+                    run {
                         if (successfulRenders >= MIN_FRAMES_FOR_RESOLUTION && (!resolutionChecked || successfulRenders % 30 == 0)) {
+                            val tRes = System.nanoTime()
                             if (handle.queryVideoResolution(resolutionOut)) {
+                                val resMs = (System.nanoTime() - tRes) / 1_000_000
+                                if (resMs > 5) println("[Render] queryVideoResolution=${resMs}ms")
                                 val vw = resolutionOut[0]
                                 val vh = resolutionOut[1]
                                 if (vw > 0 && vh > 0) {
@@ -201,10 +247,9 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                                 }
                             }
                         }
-                    } else {
-                        skippedFrames++
                     }
 
+                    // 统计输出
                     val now = System.nanoTime()
                     val elapsed = now - lastStatTime
                     if (elapsed >= 5_000_000_000L) {

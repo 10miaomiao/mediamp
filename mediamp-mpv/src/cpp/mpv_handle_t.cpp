@@ -641,6 +641,14 @@ bool mpv_handle_t::read_angle_pixels(uint8_t *out, int out_size, int *out_width,
     return angle_render_ctx_ ? angle_render_ctx_->readPixels(out, out_size, out_width, out_height) : false;
 }
 
+bool mpv_handle_t::begin_read_pixels() {
+    return angle_render_ctx_ ? angle_render_ctx_->beginReadPixels() : false;
+}
+
+bool mpv_handle_t::get_read_pixels_result(uint8_t *out, int out_size, int *out_width, int *out_height) {
+    return angle_render_ctx_ ? angle_render_ctx_->getReadPixelsResult(out, out_size, out_width, out_height) : false;
+}
+
 bool mpv_handle_t::destroy(JNIEnv *env) {
     FP;
     CHECK_HANDLE()

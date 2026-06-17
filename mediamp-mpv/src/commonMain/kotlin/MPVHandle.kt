@@ -285,6 +285,23 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
     }
 
     /**
+     * Async readback step 1: non-blocking GPU copy to staging texture.
+     * Call this after renderAngleFrame() to start the copy pipeline.
+     */
+    fun beginReadPixels(): Boolean {
+        return nBeginReadPixels(ptr)
+    }
+
+    /**
+     * Async readback step 2: map the previous staging texture and copy to output.
+     * The data is already ready on the GPU, so this is fast (~2ms).
+     * Call this BEFORE the next beginReadPixels() to get the previous frame's pixels.
+     */
+    fun getReadPixelsResult(outArray: ByteArray, outSize: IntArray): Boolean {
+        return nGetReadPixelsResult(ptr, outArray, outSize)
+    }
+
+    /**
      * Stop this `mpv_context` instance, which will run into the unrecoverable state.
      *
      * You will not expected to call any method except [close] after calling this function.
@@ -455,6 +472,8 @@ private external fun nIsAngleAvailable(ptr: Long): Boolean
 private external fun nGetAngleSharedTextureHandle(ptr: Long): Long
 private external fun nGetAngleD3D11Device(ptr: Long): Long
 private external fun nReadPixelsFromSharedTexture(ptr: Long, outArray: ByteArray, outSize: IntArray): Boolean
+private external fun nBeginReadPixels(ptr: Long): Boolean
+private external fun nGetReadPixelsResult(ptr: Long, outArray: ByteArray, outSize: IntArray): Boolean
 
 // D3D12 interop: open shared HANDLE on a D3D12 device
 private external fun nOpenSharedTextureOnD3D12(d3d12DevicePtr: Long, sharedHandle: Long): Long

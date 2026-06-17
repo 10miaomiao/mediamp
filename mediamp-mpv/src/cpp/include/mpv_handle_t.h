@@ -87,6 +87,8 @@ public:
     void *get_angle_shared_texture_handle() const;
     void *get_angle_d3d11_device() const;
     bool read_angle_pixels(uint8_t *out, int out_size, int *out_width, int *out_height);
+    bool begin_read_pixels();
+    bool get_read_pixels_result(uint8_t *out, int out_size, int *out_width, int *out_height);
 
 private:
     JavaVM *jvm_;
