@@ -361,6 +361,53 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         public fun openSharedTextureOnD3D12(d3d12DevicePtr: Long, sharedHandle: Long): Long {
             return nOpenSharedTextureOnD3D12(d3d12DevicePtr, sharedHandle)
         }
+
+        /**
+         * Create a D3D12 device and command queue for GPU texture interop.
+         * Returns long[3] = {adapterPtr, devicePtr, queuePtr} or null on failure.
+         */
+        public fun createD3D12Device(): LongArray? {
+            return nCreateD3D12Device()
+        }
+
+        /**
+         * Release a D3D12 resource (ID3D12Resource*) opened via [openSharedTextureOnD3D12].
+         */
+        public fun releaseD3D12Resource(resourcePtr: Long) {
+            nReleaseD3D12Resource(resourcePtr)
+        }
+
+        /**
+         * Destroy a D3D12 device created via [createD3D12Device].
+         * Only releases the device; caller should release adapter and queue separately.
+         */
+        public fun destroyD3D12Device(devicePtr: Long) {
+            nDestroyD3D12Device(devicePtr)
+        }
+
+        /**
+         * Get the default DXGI adapter (IDXGIAdapter1*).
+         * Used with a D3D12 device obtained from Compose/Skiko via reflection.
+         */
+        public fun getD3D12DefaultAdapter(): Long {
+            return nGetD3D12DefaultAdapter()
+        }
+
+        /**
+         * Create a D3D12 command queue on an existing device.
+         * Used with Compose's D3D12 device to create a compatible DirectContext.
+         */
+        public fun createD3D12CommandQueue(devicePtr: Long): Long {
+            return nCreateD3D12CommandQueue(devicePtr)
+        }
+
+        /**
+         * Validate if a pointer is a valid D3D12 device.
+         * Prints diagnostic info to stderr.
+         */
+        public fun validateD3D12Device(devicePtr: Long): Boolean {
+            return nValidateD3D12Device(devicePtr)
+        }
     }
 
     /*companion object {
@@ -477,6 +524,18 @@ private external fun nGetReadPixelsResult(ptr: Long, outArray: ByteArray, outSiz
 
 // D3D12 interop: open shared HANDLE on a D3D12 device
 private external fun nOpenSharedTextureOnD3D12(d3d12DevicePtr: Long, sharedHandle: Long): Long
+
+// D3D12 interop: create device and command queue
+private external fun nCreateD3D12Device(): LongArray?
+
+// D3D12 interop: release resource and device
+private external fun nReleaseD3D12Resource(resourcePtr: Long)
+private external fun nDestroyD3D12Device(devicePtr: Long)
+
+// D3D12 interop: get default adapter and create command queue (for Compose device reuse)
+private external fun nGetD3D12DefaultAdapter(): Long
+private external fun nCreateD3D12CommandQueue(devicePtr: Long): Long
+private external fun nValidateD3D12Device(devicePtr: Long): Boolean
 
 private external fun nDestroy(ptr: Long): Boolean
 private external fun nFinalize(ptr: Long)

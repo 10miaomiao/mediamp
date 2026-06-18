@@ -22,8 +22,7 @@ public class MpvMediampPlayerSurfaceProvider : MediampPlayerSurfaceProvider<MpvM
     @OptIn(InternalMediampApi::class)
     @Composable
     override fun Surface(mediampPlayer: MpvMediampPlayer, modifier: Modifier) {
-        // All platforms: Canvas-based rendering (mpv SW/GL → Bitmap → Canvas)
-        // GPU texture direct output via shared GL context is not yet stable.
+        // ANGLE: mpv ANGLE → D3D11 shared texture → async staging readback → Skia Bitmap → Canvas
         MpvMediampPlayerSurface(mediampPlayer, modifier)
     }
 }

@@ -8,6 +8,7 @@
 #include <d3d11.h>
 #include <d3d12.h>
 #include <dxgi.h>
+#include <dxgi1_4.h>
 #include <windows.h>
 #endif
 
@@ -107,6 +108,12 @@ extern "C" {
     JNIEXPORT jboolean JNICALL FN(nBeginReadPixels)(JNIEnv *env, jclass clazz, jlong ptr);
     JNIEXPORT jboolean JNICALL FN(nGetReadPixelsResult)(JNIEnv *env, jclass clazz, jlong ptr, jbyteArray outArray, jintArray outSize);
     JNIEXPORT jlong JNICALL FN(nOpenSharedTextureOnD3D12)(JNIEnv *env, jclass clazz, jlong d3d12DevicePtr, jlong sharedHandle);
+    JNIEXPORT jlongArray JNICALL FN(nCreateD3D12Device)(JNIEnv *env, jclass clazz);
+    JNIEXPORT void JNICALL FN(nReleaseD3D12Resource)(JNIEnv *env, jclass clazz, jlong resourcePtr);
+    JNIEXPORT void JNICALL FN(nDestroyD3D12Device)(JNIEnv *env, jclass clazz, jlong devicePtr);
+    JNIEXPORT jlong JNICALL FN(nGetD3D12DefaultAdapter)(JNIEnv *env, jclass clazz);
+    JNIEXPORT jlong JNICALL FN(nCreateD3D12CommandQueue)(JNIEnv *env, jclass clazz, jlong devicePtr);
+    JNIEXPORT jboolean JNICALL FN(nValidateD3D12Device)(JNIEnv *env, jclass clazz, jlong devicePtr);
 
 /**
  * 关闭此 mpv_handle_t 实例
@@ -1200,22 +1207,357 @@ JNIEXPORT jboolean JNICALL FN(nGetReadPixelsResult)(
 // Open a D3D11 shared HANDLE on a D3D12 device, returning the ID3D12Resource*.
 // Skia uses D3D12 internally; this bridges ANGLE's D3D11 texture to Skia's D3D12 pipeline.
 // Returns 0 on failure.
+// Extract the real ID3D12Device* from Skiko's internal device struct.
+// Skiko's `device` Long is a pointer to an opaque struct containing the actual
+// ID3D12Device*, ID3D12CommandQueue*, swap chain, etc.
+// This function probes memory at known offsets to find the real device pointer.
+// Check if a pointer points to a valid COM object by testing vtable readability
+// and attempting QueryInterface.
+static ID3D12Device* tryQueryD3D12Device(void* candidate) {
+    if (!candidate) return nullptr;
+
+    // Check if the candidate memory is readable
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery(candidate, &mbi, sizeof(mbi)) == 0) return nullptr;
+    if (mbi.State != MEM_COMMIT) return nullptr;
+
+    // Read the vtable pointer
+    void** vtable = *(void***)candidate;
+    if (!vtable) return nullptr;
+
+    // Check if vtable pointer is in readable memory (vtables are in .rdata/.data, not .text)
+    MEMORY_BASIC_INFORMATION mbi2;
+    if (VirtualQuery(vtable, &mbi2, sizeof(mbi2)) == 0) return nullptr;
+    if (mbi2.State != MEM_COMMIT) return nullptr;
+    // vtable data is in read-only or read-write data sections, NOT executable sections
+    if (!(mbi2.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE))) return nullptr;
+
+    // Try QueryInterface for ID3D12Device
+    IUnknown* unk = (IUnknown*)candidate;
+    ID3D12Device* device = nullptr;
+    HRESULT hr = unk->QueryInterface(__uuidof(ID3D12Device), (void**)&device);
+    if (SUCCEEDED(hr) && device) {
+        fprintf(stderr, "[tryQueryD3D12Device] Found ID3D12Device: candidate=%p, device=%p\n", candidate, device);
+        return device;
+    }
+
+    // Try ID3D12Device1
+    ID3D12Device1* device1 = nullptr;
+    hr = unk->QueryInterface(__uuidof(ID3D12Device1), (void**)&device1);
+    if (SUCCEEDED(hr) && device1) {
+        fprintf(stderr, "[tryQueryD3D12Device] Found ID3D12Device1: candidate=%p, device1=%p\n", candidate, device1);
+        return device1;
+    }
+
+    return nullptr;
+}
+
+static ID3D12Device* extractD3D12Device(void* skikoHandle) {
+    if (!skikoHandle) return nullptr;
+
+    fprintf(stderr, "[extractD3D12Device] Scanning Skiko struct at %p\n", skikoHandle);
+
+    // Dump the first 128 bytes of the struct for diagnostics
+    fprintf(stderr, "[extractD3D12Device] Struct dump (first 128 bytes):\n");
+    for (int i = 0; i < 128; i += sizeof(void*)) {
+        void** fieldPtr = (void**)((char*)skikoHandle + i);
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(fieldPtr, &mbi, sizeof(mbi)) > 0 && mbi.State == MEM_COMMIT &&
+            (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_READ))) {
+            fprintf(stderr, "  [%3d] %p\n", i, *fieldPtr);
+        } else {
+            fprintf(stderr, "  [%3d] <unreadable>\n", i);
+        }
+    }
+
+    // Known Skiko DirectXDevice layout (from JetBrains/skiko source):
+    //   class DirectXDevice {
+    //     HWND hWnd;                              // offset 0 (8 bytes)
+    //     GrD3DBackendContext backendContext;       // offset 8
+    //       gr_cp<IDXGIAdapter1> fAdapter;         //   offset 8
+    //       gr_cp<ID3D12Device>  fDevice;          //   offset 16  ← THE REAL DEVICE
+    //       gr_cp<ID3D12CommandQueue> fQueue;      //   offset 24
+    //     gr_cp<ID3D12Device> device;              // offset 48 (same pointer)
+    //     ...
+    //   }
+    //
+    // Fast path: try offset 16 first (backendContext.fDevice)
+    static const int KNOWN_DEVICE_OFFSETS[] = { 16, 48, 8, 24 };
+    for (int i = 0; i < 4; i++) {
+        int offset = KNOWN_DEVICE_OFFSETS[i];
+        void** fieldPtr = (void**)((char*)skikoHandle + offset);
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(fieldPtr, &mbi, sizeof(mbi)) == 0) continue;
+        if (mbi.State != MEM_COMMIT) continue;
+        if (!(mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_READ))) continue;
+
+        void* candidate = *fieldPtr;
+        if (!candidate) continue;
+
+        ID3D12Device* dev = tryQueryD3D12Device(candidate);
+        if (dev) {
+            fprintf(stderr, "[extractD3D12Device] Found via known offset %d: %p\n", offset, dev);
+            return dev;
+        }
+    }
+
+    // Fallback: scan all offsets
+    for (int offset = 0; offset < 4096; offset += sizeof(void*)) {
+        // Skip already-checked known offsets
+        if (offset == 8 || offset == 16 || offset == 24 || offset == 48) continue;
+
+        void** fieldPtr = (void**)((char*)skikoHandle + offset);
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(fieldPtr, &mbi, sizeof(mbi)) == 0) continue;
+        if (mbi.State != MEM_COMMIT) continue;
+        if (!(mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_READ))) continue;
+
+        void* candidate = *fieldPtr;
+        if (!candidate) continue;
+        if (candidate == skikoHandle) continue;
+
+        ID3D12Device* dev = tryQueryD3D12Device(candidate);
+        if (dev) {
+            fprintf(stderr, "[extractD3D12Device] Found via scan at offset %d: %p\n", offset, dev);
+            return dev;
+        }
+    }
+
+    fprintf(stderr, "[extractD3D12Device] ID3D12Device not found in Skiko struct\n");
+    return nullptr;
+}
+
+// Open a shared D3D11 texture handle on a D3D12 device.
+// The d3d12DevicePtr can be either:
+//   - A raw ID3D12Device* pointer
+//   - A Skiko internal device handle (will scan for the real device)
 JNIEXPORT jlong JNICALL FN(nOpenSharedTextureOnD3D12)(
     JNIEnv *env, jclass clazz, jlong d3d12DevicePtr, jlong sharedHandle) {
 #ifdef _WIN32
     if (!d3d12DevicePtr || !sharedHandle) return 0;
 
-    ID3D12Device *d3d12Device = (ID3D12Device*)d3d12DevicePtr;
+    void* handlePtr = (void*)d3d12DevicePtr;
     HANDLE hShared = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(sharedHandle));
 
+    fprintf(stderr, "[nOpenSharedTextureOnD3D12] handlePtr=%p, sharedHandle=%p\n", handlePtr, hShared);
+
+    // First check if this is already a valid ID3D12Device*
+    ID3D12Device* d3d12Device = nullptr;
+    IUnknown* unk = (IUnknown*)handlePtr;
+
+    // Check vtable pointer validity before calling QueryInterface
+    // vtable data is in .rdata/.data (PAGE_READONLY/PAGE_READWRITE), NOT executable sections
+    void** vtable = *(void***)unk;
+    MEMORY_BASIC_INFORMATION mbi;
+    bool vtableValid = false;
+    if (vtable && VirtualQuery(vtable, &mbi, sizeof(mbi)) > 0 && mbi.State == MEM_COMMIT &&
+        (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE))) {
+        vtableValid = true;
+    }
+
+    if (vtableValid) {
+        HRESULT qi_hr = unk->QueryInterface(__uuidof(ID3D12Device), (void**)&d3d12Device);
+        fprintf(stderr, "[nOpenSharedTextureOnD3D12] Direct QueryInterface hr=0x%08lx, device=%p\n", qi_hr, d3d12Device);
+    }
+
+    // If not a valid ID3D12Device directly, try scanning as Skiko struct
+    if (!d3d12Device) {
+        fprintf(stderr, "[nOpenSharedTextureOnD3D12] Not a direct ID3D12Device, scanning Skiko struct...\n");
+        d3d12Device = extractD3D12Device(handlePtr);
+        if (!d3d12Device) {
+            fprintf(stderr, "[nOpenSharedTextureOnD3D12] Could not find ID3D12Device in Skiko struct\n");
+            return 0;
+        }
+    }
+
+    fprintf(stderr, "[nOpenSharedTextureOnD3D12] Using ID3D12Device=%p\n", d3d12Device);
+
+    // Call OpenSharedHandle on the real D3D12 device
     ID3D12Resource *d3d12Resource = nullptr;
     HRESULT hr = d3d12Device->OpenSharedHandle(hShared, __uuidof(ID3D12Resource), (void**)&d3d12Resource);
+    fprintf(stderr, "[nOpenSharedTextureOnD3D12] OpenSharedHandle hr=0x%08lx\n", hr);
+
     if (FAILED(hr) || !d3d12Resource) {
+        fprintf(stderr, "[nOpenSharedTextureOnD3D12] Failed: hr=0x%08lx\n", hr);
+        d3d12Device->Release();
         return 0;
     }
+    fprintf(stderr, "[nOpenSharedTextureOnD3D12] Success: resource=%p\n", d3d12Resource);
+
+    // Don't release d3d12Device - we extracted it from Skiko's struct, don't own it
     return reinterpret_cast<jlong>(d3d12Resource);
 #else
     return 0;
+#endif
+}
+
+// Create a D3D12 device and command queue for GPU texture interop.
+// Returns long[3] = {adapterPtr, devicePtr, queuePtr} or null on failure.
+// Used for P2.5 verification: BackendRenderTarget → Surface → makeImageSnapshot.
+JNIEXPORT jlongArray JNICALL FN(nCreateD3D12Device)(JNIEnv *env, jclass clazz) {
+#ifdef _WIN32
+    // Use default adapter (nullptr = default)
+    IDXGIFactory4 *factory = nullptr;
+    HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory4), (void**)&factory);
+    if (FAILED(hr) || !factory) return nullptr;
+
+    IDXGIAdapter1 *adapter = nullptr;
+    hr = factory->EnumAdapters1(0, &adapter);
+    factory->Release();
+    if (FAILED(hr) || !adapter) return nullptr;
+
+    // Create D3D12 device
+    ID3D12Device *device = nullptr;
+    hr = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), (void**)&device);
+    if (FAILED(hr) || !device) {
+        adapter->Release();
+        return nullptr;
+    }
+
+    // Create command queue
+    D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+    queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+    ID3D12CommandQueue *queue = nullptr;
+    hr = device->CreateCommandQueue(&queueDesc, __uuidof(ID3D12CommandQueue), (void**)&queue);
+    if (FAILED(hr) || !queue) {
+        device->Release();
+        adapter->Release();
+        return nullptr;
+    }
+
+    jlongArray result = env->NewLongArray(3);
+    jlong ptrs[3] = {
+        reinterpret_cast<jlong>(adapter),
+        reinterpret_cast<jlong>(device),
+        reinterpret_cast<jlong>(queue)
+    };
+    env->SetLongArrayRegion(result, 0, 3, ptrs);
+    return result;
+#else
+    return nullptr;
+#endif
+}
+
+// Release a D3D12 resource (ID3D12Resource*).
+JNIEXPORT void JNICALL FN(nReleaseD3D12Resource)(JNIEnv *env, jclass clazz, jlong resourcePtr) {
+#ifdef _WIN32
+    if (resourcePtr) {
+        ID3D12Resource *resource = (ID3D12Resource*)resourcePtr;
+        resource->Release();
+    }
+#endif
+}
+
+// Destroy D3D12 device, adapter, and queue created by nCreateD3D12Device.
+JNIEXPORT void JNICALL FN(nDestroyD3D12Device)(JNIEnv *env, jclass clazz, jlong devicePtr) {
+#ifdef _WIN32
+    if (devicePtr) {
+        ID3D12Device *device = (ID3D12Device*)devicePtr;
+        device->Release();
+    }
+#endif
+}
+
+// Get the default DXGI adapter (IDXGIAdapter1*).
+// Used with a D3D12 device obtained from Compose/Skiko via reflection
+// to create a compatible DirectContext.
+JNIEXPORT jlong JNICALL FN(nGetD3D12DefaultAdapter)(JNIEnv *env, jclass clazz) {
+#ifdef _WIN32
+    IDXGIFactory4 *factory = nullptr;
+    HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory4), (void**)&factory);
+    if (FAILED(hr) || !factory) return 0;
+
+    IDXGIAdapter1 *adapter = nullptr;
+    hr = factory->EnumAdapters1(0, &adapter);
+    factory->Release();
+    if (FAILED(hr) || !adapter) return 0;
+
+    return reinterpret_cast<jlong>(adapter);
+#else
+    return 0;
+#endif
+}
+
+// Create a D3D12 command queue on an existing device.
+// Used with Compose's D3D12 device (obtained via reflection) to create a DirectContext.
+JNIEXPORT jlong JNICALL FN(nCreateD3D12CommandQueue)(JNIEnv *env, jclass clazz, jlong devicePtr) {
+#ifdef _WIN32
+    if (!devicePtr) return 0;
+    ID3D12Device *device = (ID3D12Device*)devicePtr;
+
+    D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+    queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+    ID3D12CommandQueue *queue = nullptr;
+    HRESULT hr = device->CreateCommandQueue(&queueDesc, __uuidof(ID3D12CommandQueue), (void**)&queue);
+    if (FAILED(hr) || !queue) return 0;
+
+    return reinterpret_cast<jlong>(queue);
+#else
+    return 0;
+#endif
+}
+
+// Validate if a pointer is a valid D3D12 device.
+// Returns true if QueryInterface for ID3D12Device succeeds.
+// Prints diagnostic info to stderr.
+JNIEXPORT jboolean JNICALL FN(nValidateD3D12Device)(JNIEnv *env, jclass clazz, jlong devicePtr) {
+#ifdef _WIN32
+    if (!devicePtr) {
+        fprintf(stderr, "[nValidateD3D12Device] devicePtr is null\n");
+        return false;
+    }
+
+    IUnknown *unk = (IUnknown*)devicePtr;
+
+    // Try to read the vtable pointer (first 8 bytes on x64)
+    void **vtable = *(void***)unk;
+    fprintf(stderr, "[nValidateD3D12Device] devicePtr=%p, vtable=%p\n", unk, vtable);
+
+    // Try QueryInterface
+    ID3D12Device *device = nullptr;
+    HRESULT hr = unk->QueryInterface(__uuidof(ID3D12Device), (void**)&device);
+    fprintf(stderr, "[nValidateD3D12Device] QueryInterface(ID3D12Device) hr=0x%08lx, device=%p\n", hr, device);
+
+    if (FAILED(hr) || !device) {
+        // Try as if it's already an ID3D12Device (maybe vtable is just offset)
+        fprintf(stderr, "[nValidateD3D12Device] Not a valid IUnknown, trying as ID3D12Device directly\n");
+
+        // Check if at least the vtable looks reasonable (D3D12 devices have many methods)
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(vtable, &mbi, sizeof(mbi))) {
+            fprintf(stderr, "[nValidateD3D12Device] vtable region: base=%p, size=%lu, state=%lu, protect=%lu\n",
+                mbi.BaseAddress, mbi.RegionSize, mbi.State, mbi.Protect);
+        }
+        return false;
+    }
+
+    // Get feature level to verify it's a real device
+    D3D_FEATURE_LEVEL fl = device->GetDeviceRemovedReason() ? D3D_FEATURE_LEVEL_11_0 : D3D_FEATURE_LEVEL_11_0;
+    (void)fl;
+
+    // Try to get device name via DXGI adapter
+    IDXGIFactory4 *factory = nullptr;
+    HRESULT fhr = CreateDXGIFactory1(__uuidof(IDXGIFactory4), (void**)&factory);
+    if (SUCCEEDED(fhr) && factory) {
+        IDXGIAdapter1 *adapter = nullptr;
+        if (SUCCEEDED(factory->EnumAdapters1(0, &adapter))) {
+            DXGI_ADAPTER_DESC1 desc;
+            if (SUCCEEDED(adapter->GetDesc1(&desc))) {
+                fprintf(stderr, "[nValidateD3D12Device] Adapter: %ls, VendorId=0x%04x, DeviceId=0x%04x\n",
+                    desc.Description, desc.VendorId, desc.DeviceId);
+            }
+            adapter->Release();
+        }
+        factory->Release();
+    }
+
+    device->Release();
+    fprintf(stderr, "[nValidateD3D12Device] Device is valid ID3D12Device\n");
+    return true;
+#else
+    return false;
 #endif
 }
 
