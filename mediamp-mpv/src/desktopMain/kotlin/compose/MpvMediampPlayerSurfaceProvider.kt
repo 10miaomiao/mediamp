@@ -22,7 +22,7 @@ public class MpvMediampPlayerSurfaceProvider : MediampPlayerSurfaceProvider<MpvM
     @OptIn(InternalMediampApi::class)
     @Composable
     override fun Surface(mediampPlayer: MpvMediampPlayer, modifier: Modifier) {
-        // ANGLE: mpv ANGLE → D3D11 shared texture → async staging readback → Skia Bitmap → Canvas
-        MpvMediampPlayerSurface(mediampPlayer, modifier)
+        // P3: D3D12 GPU direct pass-through (with async readback fallback)
+        MpvD3D12GpuSurface(mediampPlayer, modifier)
     }
 }

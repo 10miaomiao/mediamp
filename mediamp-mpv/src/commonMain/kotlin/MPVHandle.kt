@@ -402,6 +402,14 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         }
 
         /**
+         * Extract the raw ID3D12Device* from a Skiko struct pointer or raw device pointer.
+         * The returned pointer has an extra AddRef — caller must release it when done.
+         */
+        public fun extractD3D12DevicePtr(skikoOrDevicePtr: Long): Long {
+            return nExtractD3D12DevicePtr(skikoOrDevicePtr)
+        }
+
+        /**
          * Validate if a pointer is a valid D3D12 device.
          * Prints diagnostic info to stderr.
          */
@@ -535,6 +543,7 @@ private external fun nDestroyD3D12Device(devicePtr: Long)
 // D3D12 interop: get default adapter and create command queue (for Compose device reuse)
 private external fun nGetD3D12DefaultAdapter(): Long
 private external fun nCreateD3D12CommandQueue(devicePtr: Long): Long
+private external fun nExtractD3D12DevicePtr(skikoOrDevicePtr: Long): Long
 private external fun nValidateD3D12Device(devicePtr: Long): Boolean
 
 private external fun nDestroy(ptr: Long): Boolean

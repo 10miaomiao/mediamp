@@ -113,6 +113,7 @@ extern "C" {
     JNIEXPORT void JNICALL FN(nDestroyD3D12Device)(JNIEnv *env, jclass clazz, jlong devicePtr);
     JNIEXPORT jlong JNICALL FN(nGetD3D12DefaultAdapter)(JNIEnv *env, jclass clazz);
     JNIEXPORT jlong JNICALL FN(nCreateD3D12CommandQueue)(JNIEnv *env, jclass clazz, jlong devicePtr);
+    JNIEXPORT jlong JNICALL FN(nExtractD3D12DevicePtr)(JNIEnv *env, jclass clazz, jlong skikoOrDevicePtr);
     JNIEXPORT jboolean JNICALL FN(nValidateD3D12Device)(JNIEnv *env, jclass clazz, jlong devicePtr);
 
 /**
@@ -1384,7 +1385,8 @@ JNIEXPORT jlong JNICALL FN(nOpenSharedTextureOnD3D12)(
     }
     fprintf(stderr, "[nOpenSharedTextureOnD3D12] Success: resource=%p\n", d3d12Resource);
 
-    // Don't release d3d12Device - we extracted it from Skiko's struct, don't own it
+    // Release the extra reference from QueryInterface/extractD3D12Device
+    d3d12Device->Release();
     return reinterpret_cast<jlong>(d3d12Resource);
 #else
     return 0;
@@ -1481,19 +1483,62 @@ JNIEXPORT jlong JNICALL FN(nGetD3D12DefaultAdapter)(JNIEnv *env, jclass clazz) {
 
 // Create a D3D12 command queue on an existing device.
 // Used with Compose's D3D12 device (obtained via reflection) to create a DirectContext.
+// The devicePtr may be a raw ID3D12Device* or a Skiko struct pointer.
 JNIEXPORT jlong JNICALL FN(nCreateD3D12CommandQueue)(JNIEnv *env, jclass clazz, jlong devicePtr) {
 #ifdef _WIN32
     if (!devicePtr) return 0;
-    ID3D12Device *device = (ID3D12Device*)devicePtr;
+
+    // Try as raw ID3D12Device* first, then extract from Skiko struct
+    ID3D12Device *device = tryQueryD3D12Device((void*)devicePtr);
+    if (!device) {
+        device = extractD3D12Device((void*)devicePtr);
+    }
+    if (!device) {
+        fprintf(stderr, "[nCreateD3D12CommandQueue] Could not get ID3D12Device from %p\n", (void*)devicePtr);
+        return 0;
+    }
 
     D3D12_COMMAND_QUEUE_DESC queueDesc = {};
     queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
     ID3D12CommandQueue *queue = nullptr;
     HRESULT hr = device->CreateCommandQueue(&queueDesc, __uuidof(ID3D12CommandQueue), (void**)&queue);
+
+    // Release the extra ref from extractD3D12Device (tryQueryD3D12Device also AddRefs via QI)
+    device->Release();
+
     if (FAILED(hr) || !queue) return 0;
 
+    fprintf(stderr, "[nCreateD3D12CommandQueue] Created queue=%p on device=%p\n", queue, device);
     return reinterpret_cast<jlong>(queue);
+#else
+    return 0;
+#endif
+}
+
+// Extract the raw ID3D12Device* from either a raw pointer or a Skiko struct pointer.
+// Returns the raw device pointer with an AddRef (caller must Release when done).
+// Returns 0 on failure.
+JNIEXPORT jlong JNICALL FN(nExtractD3D12DevicePtr)(JNIEnv *env, jclass clazz, jlong skikoOrDevicePtr) {
+#ifdef _WIN32
+    if (!skikoOrDevicePtr) return 0;
+
+    // Try as raw ID3D12Device* first
+    ID3D12Device *device = tryQueryD3D12Device((void*)skikoOrDevicePtr);
+    if (device) {
+        fprintf(stderr, "[nExtractD3D12DevicePtr] Raw ID3D12Device: %p\n", device);
+        return reinterpret_cast<jlong>(device);
+    }
+
+    // Try extracting from Skiko struct
+    device = extractD3D12Device((void*)skikoOrDevicePtr);
+    if (device) {
+        fprintf(stderr, "[nExtractD3D12DevicePtr] Extracted from Skiko struct: %p\n", device);
+        return reinterpret_cast<jlong>(device);
+    }
+
+    fprintf(stderr, "[nExtractD3D12DevicePtr] Could not get ID3D12Device from %p\n", (void*)skikoOrDevicePtr);
+    return 0;
 #else
     return 0;
 #endif

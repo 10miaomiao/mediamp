@@ -19,16 +19,17 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.util.fastCoerceAtLeast
 import org.jetbrains.skia.BackendRenderTarget
+import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.ColorSpace
 import org.jetbrains.skia.DirectContext
 import org.jetbrains.skia.Image
+import org.jetbrains.skia.ImageInfo
 import org.jetbrains.skia.Surface
 import org.jetbrains.skia.SurfaceColorFormat
 import org.jetbrains.skia.SurfaceOrigin
 import org.openani.mediamp.InternalMediampApi
 import org.openani.mediamp.mpv.MPVHandle
 import org.openani.mediamp.mpv.MpvMediampPlayer
-import javax.swing.SwingUtilities
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -45,10 +46,25 @@ public fun MpvD3D12GpuSurface(
         onDispose { renderer.stop() }
     }
 
-    val frameTrigger by renderer.frameTrigger
+    // If D3D12 path failed, fall back to async readback
+    val failed by renderer.failed
+    if (failed) {
+        println("[D3D12Gpu] D3D12 path failed, falling back to async readback")
+        MpvMediampPlayerSurface(mediampPlayer, modifier)
+        return
+    }
+
+    // Drive continuous redraws at display refresh rate.
+    // The render thread produces frames independently; the Canvas just reads whatever is current.
+    var redrawTick by remember { mutableStateOf(0L) }
+    LaunchedEffect(renderer) {
+        while (true) {
+            withFrameNanos { redrawTick++ }
+        }
+    }
 
     Canvas(modifier) {
-        frameTrigger // read to establish subscription
+        redrawTick // establish state subscription to trigger recomposition each frame
         drawIntoCanvas { canvas ->
             renderer.drawTo(canvas.nativeCanvas, Size(size.width, size.height))
         }
@@ -64,12 +80,15 @@ private class D3D12GpuRenderer(
     // Compose's D3D12 device (obtained via reflection)
     private var composeDevice: SkikoD3D12Access.ComposeD3D12Device? = null
 
-    // Current frame state
+    // Current frame state (CPU-backed image, safe to draw on any Canvas)
     @Volatile private var currentImage: Image? = null
     @Volatile private var imageWidth = 0
     @Volatile private var imageHeight = 0
 
-    val frameTrigger = mutableStateOf(0L)
+    // Cached CPU readback resources
+    private var readbackBitmap: Bitmap? = null
+
+    val failed = mutableStateOf(false)
 
     private var renderThread: Thread? = null
     @Volatile private var running = false
@@ -86,19 +105,33 @@ private class D3D12GpuRenderer(
     }
 
     private fun renderLoop() {
-        println("[D3D12Gpu] renderLoop started, attempting to get Compose D3D12 device...")
+        println("[D3D12Gpu] renderLoop started")
 
-        // Wait for Compose's D3D12 device to become available
+        // CRITICAL: Create ANGLE render context FIRST, before waiting for Compose device.
+        // mpv's video output (vo=libmpv) needs the render context to be available immediately.
+        // If we delay, mpv fails with "[vo/libmpv:fatal] No render context set."
+        val angleOk = handle.createAngleRenderContext(1920, 1080)
+        if (!angleOk) {
+            println("[D3D12Gpu] Failed to create ANGLE render context")
+            failed.value = true
+            return
+        }
+        println("[D3D12Gpu] ANGLE render context created")
+
+        // Now wait for Compose's D3D12 device to become available
         // (SkiaLayer may not be initialized yet when we start)
+        println("[D3D12Gpu] Waiting for Compose D3D12 device...")
         var device: SkikoD3D12Access.ComposeD3D12Device? = null
         for (attempt in 1..50) {
-            // Find the active window from AWT hierarchy
             val window = findComposeWindow()
             if (window != null) {
                 device = SkikoD3D12Access.getComposeD3D12Device(window)
             }
             if (device != null) break
-            if (!running) return
+            if (!running) {
+                handle.destroyAngleRenderContext()
+                return
+            }
             println("[D3D12Gpu] Waiting for Compose D3D12 device... attempt $attempt")
             Thread.sleep(200)
         }
@@ -106,6 +139,8 @@ private class D3D12GpuRenderer(
         if (device == null) {
             println("[D3D12Gpu] FAILED: Could not get Compose D3D12 device after 50 attempts")
             println("[D3D12Gpu] Falling back: Compose may be using software or OpenGL backend")
+            handle.destroyAngleRenderContext()
+            failed.value = true
             return
         }
 
@@ -113,39 +148,35 @@ private class D3D12GpuRenderer(
         val devicePtr = device.devicePtr
         println("[D3D12Gpu] Got Compose D3D12 device: device=$devicePtr, hasContext=${device.directContext != null}")
 
-        // Use Skiko's DirectContext if available, otherwise create our own
-        val ownContext: DirectContext?
-        val directContext: DirectContext
-        if (device.directContext != null) {
-            directContext = device.directContext
-            ownContext = null
-            println("[D3D12Gpu] Using Skiko's DirectContext: $directContext")
-        } else {
-            val adapterPtr = device.adapterPtr
-            val queuePtr = device.queuePtr
-            if (adapterPtr == 0L || queuePtr == 0L) {
-                println("[D3D12Gpu] No adapter/queue available for creating DirectContext")
-                return
-            }
-            val ctx = DirectContext.makeDirect3D(adapterPtr, devicePtr, queuePtr)
-            ownContext = ctx
-            directContext = ctx
-            println("[D3D12Gpu] Created own DirectContext: $directContext")
-        }
-
-        // Create ANGLE render context on this thread
-        val angleOk = handle.createAngleRenderContext(1920, 1080)
-        if (!angleOk) {
-            println("[D3D12Gpu] Failed to create ANGLE render context")
-            directContext.close()
+        // Always create our own DirectContext — Skiko's is not thread-safe for our render thread.
+        // devicePtr from Skiko is a struct pointer, NOT a raw ID3D12Device*.
+        // DirectContext.makeDirect3D needs the raw device pointer, so we extract it via JNI.
+        val rawDevicePtr = MPVHandle.extractD3D12DevicePtr(devicePtr)
+        if (rawDevicePtr == 0L) {
+            println("[D3D12Gpu] Failed to extract raw ID3D12Device from Skiko struct")
+            handle.destroyAngleRenderContext()
+            failed.value = true
             return
         }
-        println("[D3D12Gpu] ANGLE render context created")
+        println("[D3D12Gpu] Extracted raw ID3D12Device: $rawDevicePtr")
 
-        // Import shared texture on Compose's D3D12 device
-        var d3d12TexturePtr = 0L
-        var cachedSharedHandle = 0L
-        var backendRT: BackendRenderTarget? = null
+        val adapterPtr = device.adapterPtr.takeIf { it != 0L }
+            ?: MPVHandle.getD3D12DefaultAdapter()
+        val queuePtr = device.queuePtr.takeIf { it != 0L }
+            ?: MPVHandle.createD3D12CommandQueue(devicePtr)
+        if (adapterPtr == 0L || queuePtr == 0L) {
+            println("[D3D12Gpu] Failed to get adapter/queue for DirectContext")
+            handle.destroyAngleRenderContext()
+            failed.value = true
+            return
+        }
+        val directContext = DirectContext.makeDirect3D(adapterPtr, rawDevicePtr, queuePtr)
+        println("[D3D12Gpu] Created own DirectContext: $directContext")
+
+        // Cache D3D12 resources per shared handle to avoid release/re-open every frame.
+        // With double-buffered textures, there are only 2 unique handles.
+        val d3d12TextureCache = HashMap<Long, Long>()         // sharedHandle → d3d12TexturePtr
+        val backendRTCache = HashMap<Long, BackendRenderTarget>()  // sharedHandle → BackendRenderTarget
 
         var renderedFrames = 0L
         var lastStatTime = System.nanoTime()
@@ -165,71 +196,81 @@ private class D3D12GpuRenderer(
                 val sharedHandle = handle.getAngleSharedTextureHandle()
                 if (sharedHandle == 0L) continue
 
-                // Import shared texture on Compose's D3D12 device if handle changed
-                if (sharedHandle != cachedSharedHandle) {
-                    // Release old D3D12 texture
-                    if (d3d12TexturePtr != 0L) {
-                        MPVHandle.releaseD3D12Resource(d3d12TexturePtr)
-                        d3d12TexturePtr = 0L
-                    }
-                    // Release old backend render target
-                    backendRT?.close()
-                    backendRT = null
-
-                    // Open shared texture on Compose's D3D12 device
-                    d3d12TexturePtr = MPVHandle.openSharedTextureOnD3D12(devicePtr, sharedHandle)
+                // Get or create D3D12 resources for this handle
+                var rt = backendRTCache[sharedHandle]
+                if (rt == null) {
+                    val d3d12TexturePtr = MPVHandle.openSharedTextureOnD3D12(devicePtr, sharedHandle)
                     if (d3d12TexturePtr == 0L) {
                         println("[D3D12Gpu] Failed to open shared texture on Compose D3D12 device")
                         continue
                     }
 
                     // Create BackendRenderTarget from D3D12 texture
-                    // DXGI_FORMAT_R8G8B8A8_UNORM = 28
-                    backendRT = BackendRenderTarget.makeDirect3D(
+                    // DXGI_FORMAT_B8G8R8A8_UNORM = 87 (ANGLE default)
+                    rt = BackendRenderTarget.makeDirect3D(
                         1920, 1080,
                         d3d12TexturePtr,
-                        28, // DXGI_FORMAT_R8G8B8A8_UNORM
+                        87, // DXGI_FORMAT_B8G8R8A8_UNORM
                         1,  // sampleCnt
                         1   // levelCnt
                     )
+                    if (rt == null) {
+                        MPVHandle.releaseD3D12Resource(d3d12TexturePtr)
+                        println("[D3D12Gpu] Failed to create BackendRenderTarget")
+                        continue
+                    }
 
-                    cachedSharedHandle = sharedHandle
-                    println("[D3D12Gpu] Imported D3D12 texture on Compose device: handle=$sharedHandle, texture=$d3d12TexturePtr")
+                    d3d12TextureCache[sharedHandle] = d3d12TexturePtr
+                    backendRTCache[sharedHandle] = rt
+                    println("[D3D12Gpu] Imported D3D12 texture: handle=$sharedHandle, texture=$d3d12TexturePtr")
                 }
 
-                val rt = backendRT ?: continue
-
                 // Create Surface from BackendRenderTarget using our DirectContext
-                // (created from Compose's device, so resources are compatible)
+                // ANGLE uses BGRA by default, so we match that format
                 val surface = Surface.makeFromBackendRenderTarget(
                     directContext,
                     rt,
                     SurfaceOrigin.TOP_LEFT,
-                    SurfaceColorFormat.RGBA_8888,
+                    SurfaceColorFormat.BGRA_8888,
                     ColorSpace.sRGB,
                 )
 
                 if (surface != null) {
-                    // Snapshot → Image (backed by texture on Compose's device)
-                    val image = surface.makeImageSnapshot()
+                    // Flush Skia's D3D12 pipeline and wait for GPU to ensure
+                    // synchronization with D3D11 writes from ANGLE
+                    directContext.flushAndSubmit(surface, true)
+
+                    // Try reading pixels from Surface directly (before close)
+                    val w = 1920
+                    val h = 1080
+                    val bmp = readbackBitmap ?: Bitmap().also { readbackBitmap = it }
+                    bmp.allocPixels(ImageInfo.makeN32Premul(w, h))
+
+                    // Method 1: Surface.readPixels
+                    var readOk = surface.readPixels(bmp, 0, 0)
+                    if (!readOk) {
+                        // Method 2: Snapshot → Image.readPixels
+                        val gpuImage = surface.makeImageSnapshot()
+                        if (gpuImage != null) {
+                            readOk = gpuImage.readPixels(bmp, 0, 0)
+                            gpuImage.close()
+                        }
+                    }
                     surface.close()
 
-                    if (image != null) {
-                        // Close old image
-                        currentImage?.close()
-                        currentImage = image
-                        imageWidth = image.width
-                        imageHeight = image.height
+                    if (readOk) {
+                        val cpuImage = Image.makeFromBitmap(bmp)
+                        val oldImage = currentImage
+                        currentImage = cpuImage
+                        imageWidth = w
+                        imageHeight = h
+                        oldImage?.close()
 
                         if (renderedFrames <= 3 || renderedFrames % 150 == 0L) {
-                            println("[D3D12Gpu] Snapshot OK: ${image.width}x${image.height}, image=$image")
-                        }
-
-                        SwingUtilities.invokeLater {
-                            frameTrigger.value = System.nanoTime()
+                            println("[D3D12Gpu] CPU readback OK: ${w}x${h}")
                         }
                     } else {
-                        println("[D3D12Gpu] makeImageSnapshot returned null")
+                        if (renderedFrames <= 3) println("[D3D12Gpu] readPixels failed (both Surface and Image)")
                     }
                 } else {
                     println("[D3D12Gpu] makeFromBackendRenderTarget returned null")
@@ -253,12 +294,12 @@ private class D3D12GpuRenderer(
             }
         }
 
-        // Cleanup
-        backendRT?.close()
-        ownContext?.close() // Only close if we created it (not Skiko's)
-        if (d3d12TexturePtr != 0L) MPVHandle.releaseD3D12Resource(d3d12TexturePtr)
+        // Cleanup cached resources
+        backendRTCache.values.forEach { it.close() }
+        d3d12TextureCache.values.forEach { MPVHandle.releaseD3D12Resource(it) }
+        directContext.close()
+        MPVHandle.releaseD3D12Resource(rawDevicePtr)  // Release the extra AddRef from extractD3D12DevicePtr
         handle.destroyAngleRenderContext()
-        // Don't release device/adapter/queue/context - they belong to Compose
     }
 
     private var drawCount = 0L
@@ -298,13 +339,13 @@ private class D3D12GpuRenderer(
         running = false
         renderThread?.let { t ->
             t.interrupt()
-            if (t.isAlive) {
-                try { t.isDaemon = true } catch (_: IllegalThreadStateException) {}
-            }
+            t.join(5000) // Wait for render thread to finish before cleaning up resources
         }
         renderThread = null
         currentImage?.close()
         currentImage = null
+        readbackBitmap?.close()
+        readbackBitmap = null
     }
 
     /**
