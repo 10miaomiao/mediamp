@@ -200,7 +200,7 @@ bool angle_render_context_t::createSharedTextures() {
         desc.Height = height_;
         desc.MipLevels = 1;
         desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         desc.SampleDesc.Count = 1;
         desc.SampleDesc.Quality = 0;
         desc.Usage = D3D11_USAGE_DEFAULT;
@@ -464,9 +464,8 @@ bool angle_render_context_t::render() {
             LOG("render: mpv_render_context_render succeeded, frame #%d", render_call_count);
         }
 
-        // glFlush submits GL commands; eglWaitClient ensures GPU finishes before readback CopyResource
+        // glFlush submits GL commands to the GPU
         glFlush();
-        eglWaitClient();
 
         // Swap double-buffer: write becomes read, read becomes write
         int new_read = write_idx_;
@@ -692,6 +691,7 @@ bool angle_render_context_t::beginReadPixels() {
 
     // Non-blocking GPU copy to current staging texture
     readback_ctx_->CopyResource(async_staging_[async_write_idx_], src);
+
     async_pending_ = true;
     return true;
 }
@@ -699,9 +699,9 @@ bool angle_render_context_t::beginReadPixels() {
 bool angle_render_context_t::getReadPixelsResult(uint8_t *out, int out_size, int *out_width, int *out_height) {
     if (!async_pending_) return false;
 
-    // Map the PREVIOUS staging texture (data is ready after one render cycle)
-    int prev_idx = 1 - async_write_idx_;
-    ID3D11Texture2D *staging = async_staging_[prev_idx];
+    // Map the CURRENT staging texture (data was just copied by beginReadPixels)
+    int read_idx = async_write_idx_;
+    ID3D11Texture2D *staging = async_staging_[read_idx];
     if (!staging) return false;
 
     D3D11_MAPPED_SUBRESOURCE mapped;
@@ -731,7 +731,7 @@ bool angle_render_context_t::getReadPixelsResult(uint8_t *out, int out_size, int
     readback_ctx_->Unmap(staging, 0);
 
     // Advance staging buffer index for next beginReadPixels call
-    async_write_idx_ = prev_idx;
+    async_write_idx_ = 1 - async_write_idx_;
     async_pending_ = false;
     return true;
 }
