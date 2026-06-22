@@ -416,6 +416,27 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
         public fun validateD3D12Device(devicePtr: Long): Boolean {
             return nValidateD3D12Device(devicePtr)
         }
+
+        /**
+         * Transition a D3D12 resource state.
+         * Needed for cross-API shared textures (D3D11→D3D12) to be properly
+         * transitioned from COMMON state to PIXEL_SHADER_RESOURCE for Skia rendering.
+         *
+         * @param devicePtr ID3D12Device* pointer
+         * @param queuePtr ID3D12CommandQueue* pointer
+         * @param resourcePtr ID3D12Resource* pointer
+         * @param fromState Source D3D12_RESOURCE_STATES (e.g., 0 = D3D12_RESOURCE_STATE_COMMON)
+         * @param toState Target D3D12_RESOURCE_STATES (e.g., 1 = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER)
+         */
+        public fun transitionD3D12ResourceState(
+            devicePtr: Long,
+            queuePtr: Long,
+            resourcePtr: Long,
+            fromState: Int,
+            toState: Int,
+        ): Boolean {
+            return nTransitionD3D12ResourceState(devicePtr, queuePtr, resourcePtr, fromState, toState)
+        }
     }
 
     /*companion object {
@@ -545,6 +566,7 @@ private external fun nGetD3D12DefaultAdapter(): Long
 private external fun nCreateD3D12CommandQueue(devicePtr: Long): Long
 private external fun nExtractD3D12DevicePtr(skikoOrDevicePtr: Long): Long
 private external fun nValidateD3D12Device(devicePtr: Long): Boolean
+private external fun nTransitionD3D12ResourceState(devicePtr: Long, queuePtr: Long, resourcePtr: Long, fromState: Int, toState: Int): Boolean
 
 private external fun nDestroy(ptr: Long): Boolean
 private external fun nFinalize(ptr: Long)

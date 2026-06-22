@@ -115,6 +115,7 @@ extern "C" {
     JNIEXPORT jlong JNICALL FN(nCreateD3D12CommandQueue)(JNIEnv *env, jclass clazz, jlong devicePtr);
     JNIEXPORT jlong JNICALL FN(nExtractD3D12DevicePtr)(JNIEnv *env, jclass clazz, jlong skikoOrDevicePtr);
     JNIEXPORT jboolean JNICALL FN(nValidateD3D12Device)(JNIEnv *env, jclass clazz, jlong devicePtr);
+    JNIEXPORT jboolean JNICALL FN(nTransitionD3D12ResourceState)(JNIEnv *env, jclass clazz, jlong devicePtr, jlong queuePtr, jlong resourcePtr, jint fromState, jint toState);
 
 /**
  * 关闭此 mpv_handle_t 实例
@@ -1390,6 +1391,171 @@ JNIEXPORT jlong JNICALL FN(nOpenSharedTextureOnD3D12)(
     return reinterpret_cast<jlong>(d3d12Resource);
 #else
     return 0;
+#endif
+}
+
+// Transition a D3D12 resource state using a command queue.
+// This is needed for cross-API shared textures (D3D11→D3D12) to be properly
+// transitioned from COMMON state to PIXEL_SHADER_RESOURCE for Skia rendering.
+// Returns true on success.
+JNIEXPORT jboolean JNICALL FN(nTransitionD3D12ResourceState)(
+    JNIEnv *env, jclass clazz, jlong devicePtr, jlong queuePtr, jlong resourcePtr,
+    jint fromState, jint toState) {
+#ifdef _WIN32
+    if (!devicePtr || !queuePtr || !resourcePtr) return JNI_FALSE;
+
+    ID3D12Device* device = (ID3D12Device*)devicePtr;
+    ID3D12CommandQueue* queue = (ID3D12CommandQueue*)queuePtr;
+    ID3D12Resource* resource = (ID3D12Resource*)resourcePtr;
+
+    fprintf(stderr, "[nTransitionD3D12ResourceState] device=%p, queue=%p, resource=%p, %d->%d\n",
+            device, queue, resource, fromState, toState);
+
+    // Check resource desc to understand its properties
+    D3D12_RESOURCE_DESC desc = resource->GetDesc();
+    fprintf(stderr, "[nTransitionD3D12ResourceState] Resource desc: Dimension=%d, Width=%llu, Height=%u, Format=%d, Flags=0x%08x\n",
+            desc.Dimension, desc.Width, desc.Height, desc.Format, desc.Flags);
+
+    // Check if resource has ALLOW_SIMULTANEOUS_ACCESS flag
+    bool simultaneousAccess = (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) != 0;
+    fprintf(stderr, "[nTransitionD3D12ResourceState] ALLOW_SIMULTANEOUS_ACCESS=%d\n", simultaneousAccess);
+
+    // For simultaneous access resources, barriers might not be needed
+    // Let's try without barrier first - just execute an empty command list
+    if (simultaneousAccess) {
+        fprintf(stderr, "[nTransitionD3D12ResourceState] Resource has ALLOW_SIMULTANEOUS_ACCESS, trying without barrier\n");
+
+        // Create command allocator
+        ID3D12CommandAllocator* allocator = nullptr;
+        HRESULT hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+            __uuidof(ID3D12CommandAllocator), (void**)&allocator);
+        if (FAILED(hr) || !allocator) {
+            fprintf(stderr, "[nTransitionD3D12ResourceState] CreateCommandAllocator failed: 0x%08lx\n", hr);
+            return JNI_FALSE;
+        }
+
+        // Create command list (returns in OPEN state)
+        ID3D12GraphicsCommandList* cmdList = nullptr;
+        hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr,
+            __uuidof(ID3D12GraphicsCommandList), (void**)&cmdList);
+        if (FAILED(hr) || !cmdList) {
+            fprintf(stderr, "[nTransitionD3D12ResourceState] CreateCommandList failed: 0x%08lx\n", hr);
+            allocator->Release();
+            return JNI_FALSE;
+        }
+
+        // Close command list without recording any barriers
+        hr = cmdList->Close();
+        if (FAILED(hr)) {
+            fprintf(stderr, "[nTransitionD3D12ResourceState] Close (no barrier) failed: 0x%08lx\n", hr);
+            cmdList->Release();
+            allocator->Release();
+            return JNI_FALSE;
+        }
+
+        // Execute empty command list
+        ID3D12CommandList* cmdLists[] = { cmdList };
+        queue->ExecuteCommandLists(1, cmdLists);
+
+        // Create fence and wait for completion
+        ID3D12Fence* fence = nullptr;
+        hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&fence);
+        if (FAILED(hr) || !fence) {
+            fprintf(stderr, "[nTransitionD3D12ResourceState] CreateFence failed: 0x%08lx\n", hr);
+            cmdList->Release();
+            allocator->Release();
+            return JNI_FALSE;
+        }
+
+        hr = queue->Signal(fence, 1);
+        if (SUCCEEDED(hr) && fence->GetCompletedValue() < 1) {
+            HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            if (event) {
+                fence->SetEventOnCompletion(1, event);
+                WaitForSingleObject(event, INFINITE);
+                CloseHandle(event);
+            }
+        }
+
+        fprintf(stderr, "[nTransitionD3D12ResourceState] Success (no barrier, simultaneous access)\n");
+
+        fence->Release();
+        cmdList->Release();
+        allocator->Release();
+        return JNI_TRUE;
+    }
+
+    // For non-simultaneous access resources, try with barrier
+    // Create command allocator
+    ID3D12CommandAllocator* allocator = nullptr;
+    HRESULT hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+        __uuidof(ID3D12CommandAllocator), (void**)&allocator);
+    if (FAILED(hr) || !allocator) {
+        fprintf(stderr, "[nTransitionD3D12ResourceState] CreateCommandAllocator failed: 0x%08lx\n", hr);
+        return JNI_FALSE;
+    }
+
+    // Create command list (returns in OPEN state)
+    ID3D12GraphicsCommandList* cmdList = nullptr;
+    hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr,
+        __uuidof(ID3D12GraphicsCommandList), (void**)&cmdList);
+    if (FAILED(hr) || !cmdList) {
+        fprintf(stderr, "[nTransitionD3D12ResourceState] CreateCommandList failed: 0x%08lx\n", hr);
+        allocator->Release();
+        return JNI_FALSE;
+    }
+
+    // Record resource barrier
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barrier.Transition.pResource = resource;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = (D3D12_RESOURCE_STATES)fromState;
+    barrier.Transition.StateAfter = (D3D12_RESOURCE_STATES)toState;
+    cmdList->ResourceBarrier(1, &barrier);
+
+    // Close command list
+    hr = cmdList->Close();
+    if (FAILED(hr)) {
+        fprintf(stderr, "[nTransitionD3D12ResourceState] Close failed: 0x%08lx\n", hr);
+        cmdList->Release();
+        allocator->Release();
+        return JNI_FALSE;
+    }
+
+    // Execute command list
+    ID3D12CommandList* cmdLists[] = { cmdList };
+    queue->ExecuteCommandLists(1, cmdLists);
+
+    // Create fence and wait for completion
+    ID3D12Fence* fence = nullptr;
+    hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&fence);
+    if (FAILED(hr) || !fence) {
+        fprintf(stderr, "[nTransitionD3D12ResourceState] CreateFence failed: 0x%08lx\n", hr);
+        cmdList->Release();
+        allocator->Release();
+        return JNI_FALSE;
+    }
+
+    hr = queue->Signal(fence, 1);
+    if (SUCCEEDED(hr) && fence->GetCompletedValue() < 1) {
+        HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (event) {
+            fence->SetEventOnCompletion(1, event);
+            WaitForSingleObject(event, INFINITE);
+            CloseHandle(event);
+        }
+    }
+
+    fprintf(stderr, "[nTransitionD3D12ResourceState] Success\n");
+
+    fence->Release();
+    cmdList->Release();
+    allocator->Release();
+    return JNI_TRUE;
+#else
+    return JNI_FALSE;
 #endif
 }
 

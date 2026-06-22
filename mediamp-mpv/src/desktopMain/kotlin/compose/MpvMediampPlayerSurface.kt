@@ -150,23 +150,14 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                     if (!running) break
 
                     if (useAngle) {
-                        // ANGLE 同步回读：
-                        // 1. 渲染新帧
-                        val t0 = System.nanoTime()
-                        val rendered = handle.renderAngleFrame()
-                        val renderMs = (System.nanoTime() - t0) / 1_000_000
-
-                        if (rendered) {
-                            lastRenderMs = renderMs
-                            renderedFrames++
-                            successfulRenders++
-
-                            // 2. 同步回读像素
+                        // ANGLE 异步流水线回读：
+                        // 1. 取回上一帧的像素（非阻塞，GPU 拷贝早已完成）
+                        if (readbackPending) {
                             val tRead = System.nanoTime()
-                            val readOk = handle.copyAnglePixels(frameBytes, sizeOut)
+                            val readOk = handle.getReadPixelsResult(frameBytes, sizeOut)
                             val readMs = (System.nanoTime() - tRead) / 1_000_000
-
                             if (readOk) {
+                                readbackPending = false
                                 val w = sizeOut[0]
                                 val h = sizeOut[1]
                                 val neededSize = w * h * 4
@@ -182,8 +173,29 @@ private class MpvRenderState(private val player: MpvMediampPlayer) {
                                     }
                                 }
                                 if (loopCount <= 20 || loopCount % 100 == 0) {
-                                    println("[Render] Loop #$loopCount: render=${renderMs}ms, sync readPixels=${readMs}ms")
+                                    println("[Render] Loop #$loopCount: async readPixels=${readMs}ms")
                                 }
+                            } else {
+                                // GPU 还未完成，保持 readbackPending = true，下一帧再检查
+                            }
+                        }
+
+                        // 2. 渲染新帧
+                        val t0 = System.nanoTime()
+                        val rendered = handle.renderAngleFrame()
+                        val renderMs = (System.nanoTime() - t0) / 1_000_000
+
+                        if (rendered) {
+                            lastRenderMs = renderMs
+                            renderedFrames++
+                            successfulRenders++
+
+                            // 3. 启动异步回读（非阻塞 CopyResource）
+                            val readbackStarted = handle.beginReadPixels()
+                            readbackPending = readbackStarted
+
+                            if (loopCount <= 20 || loopCount % 100 == 0) {
+                                println("[Render] Loop #$loopCount: render=${renderMs}ms, async readback started=$readbackStarted")
                             }
                         } else {
                             skippedFrames++

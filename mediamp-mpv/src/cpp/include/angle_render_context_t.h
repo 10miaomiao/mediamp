@@ -17,6 +17,7 @@
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
+struct ID3D11Query;
 
 namespace mediampv {
 
@@ -101,6 +102,7 @@ private:
     int async_staging_height_ = 0;
     int async_write_idx_ = 0;   // which staging texture to CopyResource into
     bool async_pending_ = false; // true if a CopyResource has been issued but not yet mapped
+    ID3D11Query *async_query_ = nullptr; // D3D11 event query for GPU completion synchronization
 
     bool initEGL();
     void cleanupEGL();

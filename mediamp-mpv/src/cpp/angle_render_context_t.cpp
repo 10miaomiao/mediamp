@@ -464,8 +464,10 @@ bool angle_render_context_t::render() {
             LOG("render: mpv_render_context_render succeeded, frame #%d", render_call_count);
         }
 
-        // glFlush submits GL commands to the GPU
-        glFlush();
+        // glFinish waits for all GL commands to complete on GPU
+        // This ensures the D3D11 shared texture is fully written before
+        // D3D12 imports it for zero-copy rendering
+        glFinish();
 
         // Swap double-buffer: write becomes read, read becomes write
         int new_read = write_idx_;
@@ -614,6 +616,10 @@ void angle_render_context_t::releaseReadbackCache() {
             async_staging_[i] = nullptr;
         }
     }
+    if (async_query_) {
+        async_query_->Release();
+        async_query_ = nullptr;
+    }
     if (readback_ctx_) {
         readback_ctx_->Release();
         readback_ctx_ = nullptr;
@@ -689,8 +695,21 @@ bool angle_render_context_t::beginReadPixels() {
         async_pending_ = false;
     }
 
+    // Create D3D11 event query if not yet created
+    if (!async_query_) {
+        D3D11_QUERY_DESC queryDesc = { D3D11_QUERY_EVENT, 0 };
+        HRESULT hr = readback_device_->CreateQuery(&queryDesc, &async_query_);
+        if (FAILED(hr) || !async_query_) {
+            LOG("beginReadPixels: Failed to create D3D11 query, hr=0x%lX", hr);
+            return false;
+        }
+        LOG("beginReadPixels: Created D3D11 event query");
+    }
+
     // Non-blocking GPU copy to current staging texture
     readback_ctx_->CopyResource(async_staging_[async_write_idx_], src);
+    readback_ctx_->End(async_query_);  // Mark GPU completion point
+    readback_ctx_->Flush();  // Submit commands to GPU
 
     async_pending_ = true;
     return true;
@@ -698,6 +717,20 @@ bool angle_render_context_t::beginReadPixels() {
 
 bool angle_render_context_t::getReadPixelsResult(uint8_t *out, int out_size, int *out_width, int *out_height) {
     if (!async_pending_) return false;
+
+    // Check if GPU has finished the CopyResource
+    if (async_query_) {
+        HRESULT hr = readback_ctx_->GetData(async_query_, nullptr, 0, 0);
+        if (hr == S_FALSE) {
+            // GPU hasn't finished yet, try again next frame
+            return false;
+        }
+        if (FAILED(hr)) {
+            LOG("getReadPixelsResult: GetData failed, hr=0x%lX", hr);
+            async_pending_ = false;
+            return false;
+        }
+    }
 
     // Map the CURRENT staging texture (data was just copied by beginReadPixels)
     int read_idx = async_write_idx_;
@@ -708,6 +741,7 @@ bool angle_render_context_t::getReadPixelsResult(uint8_t *out, int out_size, int
     HRESULT hr = readback_ctx_->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) {
         LOG("getReadPixelsResult: Map failed, hr=0x%lX", hr);
+        async_pending_ = false;
         return false;
     }
 
