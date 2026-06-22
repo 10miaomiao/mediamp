@@ -52,19 +52,91 @@ namespace mediampv {
 
 bool angle_render_context_t::initEGL() {
     // Initialize EGL display with ANGLE D3D11 backend
+    // We create a D3D11 device explicitly with video support for hwdec
     EGLDisplay display = EGL_NO_DISPLAY;
 
     // Try eglGetPlatformDisplayEXT with D3D11 backend
     auto eglGetPlatformDisplayEXT = (PFNEGLGETPLATFORMDISPLAYEXTPROC)
         eglGetProcAddress("eglGetPlatformDisplayEXT");
 
-    if (eglGetPlatformDisplayEXT) {
-        display = eglGetPlatformDisplayEXT(
-            EGL_PLATFORM_ANGLE_ANGLE,
-            (void*)EGL_D3D11_ONLY_DISPLAY_ANGLE,
-            nullptr
-        );
-        LOG("ANGLE: Using D3D11 backend via eglGetPlatformDisplayEXT");
+    // Create D3D11 device with video support for hardware decoding
+    ID3D11Device *videoDevice = nullptr;
+    ID3D11DeviceContext *videoCtx = nullptr;
+    D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_0 };
+    D3D_FEATURE_LEVEL obtainedLevel;
+
+    HRESULT hr = D3D11CreateDevice(
+        nullptr,                        // default adapter
+        D3D_DRIVER_TYPE_HARDWARE,       // hardware device
+        nullptr,                        // no software module
+        D3D11_CREATE_DEVICE_VIDEO_SUPPORT,  // enable video decoding
+        featureLevels, 1,               // feature levels
+        D3D11_SDK_VERSION,
+        &videoDevice,
+        &obtainedLevel,
+        &videoCtx
+    );
+
+    if (SUCCEEDED(hr) && videoDevice) {
+        LOG("ANGLE: Created D3D11 device with VIDEO_SUPPORT: %p", videoDevice);
+
+        // Check if NV12 format is supported (required for hwdec)
+        UINT nv12Support = 0;
+        hr = videoDevice->CheckFormatSupport(DXGI_FORMAT_NV12, &nv12Support);
+        if (SUCCEEDED(hr) && (nv12Support & D3D11_BIND_DECODER)) {
+            LOG("ANGLE: NV12 format with DECODER bind support confirmed");
+        } else {
+            LOG("ANGLE: NV12 DECODER support not available (hr=0x%lX, support=0x%X)", hr, nv12Support);
+        }
+
+        // Create ANGLE EGL device from our D3D11 device
+        typedef EGLDeviceEXT (EGLAPIENTRYP PFNEGLCREATEDEVICEANGLEPROC)(EGLint device_type, void *device, const EGLAttrib *attrib_list);
+        auto eglCreateDeviceANGLE = (PFNEGLCREATEDEVICEANGLEPROC)
+            eglGetProcAddress("eglCreateDeviceANGLE");
+
+        if (eglCreateDeviceANGLE) {
+            EGLDeviceEXT eglDevice = eglCreateDeviceANGLE(
+                EGL_D3D11_DEVICE_ANGLE, videoDevice, nullptr);
+            if (eglDevice != EGL_NO_DEVICE_EXT) {
+                LOG("ANGLE: Created EGL device from D3D11 device: %p", eglDevice);
+
+                // Get EGL display from the ANGLE device
+                if (eglGetPlatformDisplayEXT) {
+                    display = eglGetPlatformDisplayEXT(
+                        EGL_PLATFORM_DEVICE_EXT, eglDevice, nullptr);
+                    LOG("ANGLE: Got EGL display from ANGLE device: %p", display);
+                }
+            } else {
+                LOG("ANGLE: eglCreateDeviceANGLE failed, error=0x%X", eglGetError());
+            }
+        } else {
+            LOG("ANGLE: eglCreateDeviceANGLE not available");
+        }
+
+        // Release the device context (we only need the device)
+        if (videoCtx) {
+            videoCtx->Release();
+            videoCtx = nullptr;
+        }
+    } else {
+        LOG("ANGLE: Failed to create D3D11 device with VIDEO_SUPPORT, hr=0x%lX", hr);
+    }
+
+    // Fallback: try eglGetPlatformDisplayEXT with D3D11 backend (ANGLE creates its own device)
+    if (display == EGL_NO_DISPLAY) {
+        if (videoDevice) {
+            videoDevice->Release();
+            videoDevice = nullptr;
+        }
+
+        if (eglGetPlatformDisplayEXT) {
+            display = eglGetPlatformDisplayEXT(
+                EGL_PLATFORM_ANGLE_ANGLE,
+                (void*)EGL_D3D11_ONLY_DISPLAY_ANGLE,
+                nullptr
+            );
+            LOG("ANGLE: Using D3D11 backend via eglGetPlatformDisplayEXT (fallback)");
+        }
     }
 
     if (display == EGL_NO_DISPLAY) {
@@ -74,12 +146,14 @@ bool angle_render_context_t::initEGL() {
 
     if (display == EGL_NO_DISPLAY) {
         LOG("ANGLE: Failed to get EGL display");
+        if (videoDevice) videoDevice->Release();
         return false;
     }
 
     EGLint major, minor;
     if (!eglInitialize(display, &major, &minor)) {
         LOG("ANGLE: Failed to initialize EGL, error=0x%X", eglGetError());
+        if (videoDevice) videoDevice->Release();
         return false;
     }
     LOG("ANGLE: EGL initialized: version %d.%d", major, minor);
@@ -124,28 +198,34 @@ bool angle_render_context_t::initEGL() {
     egl_display_ = (void*)display;
     egl_context_ = (void*)context;
 
-    // Query the D3D11 device from ANGLE
-    auto eglQueryDisplayAttribEXT = (PFNEGLQUERYDISPLAYATTRIBEXTPROC)
-        eglGetProcAddress("eglQueryDisplayAttribEXT");
-    auto eglQueryDeviceAttribEXT = (PFNEGLQUERYDEVICEATTRIBEXTPROC)
-        eglGetProcAddress("eglQueryDeviceAttribEXT");
+    // Use the video-capable device if we created one, otherwise query from ANGLE
+    if (videoDevice) {
+        d3d11_device_ = videoDevice;
+        LOG("ANGLE: Using explicitly created D3D11 device with VIDEO_SUPPORT: %p", d3d11_device_);
+    } else {
+        // Query the D3D11 device from ANGLE (fallback path)
+        auto eglQueryDisplayAttribEXT = (PFNEGLQUERYDISPLAYATTRIBEXTPROC)
+            eglGetProcAddress("eglQueryDisplayAttribEXT");
+        auto eglQueryDeviceAttribEXT = (PFNEGLQUERYDEVICEATTRIBEXTPROC)
+            eglGetProcAddress("eglQueryDeviceAttribEXT");
 
-    if (eglQueryDisplayAttribEXT && eglQueryDeviceAttribEXT) {
-        EGLAttrib device = 0;
-        if (eglQueryDisplayAttribEXT(display, EGL_DEVICE_EXT, &device)) {
-            EGLAttrib d3d11_device_ptr = 0;
-            if (eglQueryDeviceAttribEXT((EGLDeviceEXT)device, EGL_D3D11_DEVICE_ANGLE, &d3d11_device_ptr)) {
-                d3d11_device_ = (ID3D11Device*)d3d11_device_ptr;
-                if (d3d11_device_) {
-                    d3d11_device_->AddRef();
-                    LOG("ANGLE: Got D3D11 device from ANGLE: %p", d3d11_device_);
+        if (eglQueryDisplayAttribEXT && eglQueryDeviceAttribEXT) {
+            EGLAttrib device = 0;
+            if (eglQueryDisplayAttribEXT(display, EGL_DEVICE_EXT, &device)) {
+                EGLAttrib d3d11_device_ptr = 0;
+                if (eglQueryDeviceAttribEXT((EGLDeviceEXT)device, EGL_D3D11_DEVICE_ANGLE, &d3d11_device_ptr)) {
+                    d3d11_device_ = (ID3D11Device*)d3d11_device_ptr;
+                    if (d3d11_device_) {
+                        d3d11_device_->AddRef();
+                        LOG("ANGLE: Got D3D11 device from ANGLE: %p", d3d11_device_);
+                    }
                 }
             }
         }
-    }
 
-    if (!d3d11_device_) {
-        LOG("ANGLE: Failed to get D3D11 device from ANGLE");
+        if (!d3d11_device_) {
+            LOG("ANGLE: Failed to get D3D11 device from ANGLE");
+        }
     }
 
     // Log GL info
