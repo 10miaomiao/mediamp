@@ -90,6 +90,9 @@ public:
     bool begin_read_pixels();
     bool get_read_pixels_result(uint8_t *out, int out_size, int *out_width, int *out_height);
 
+    // Get the ANGLE render context (for fence operations)
+    angle_render_context_t *get_angle_render_context() const { return angle_render_ctx_; }
+
 private:
     JavaVM *jvm_;
     mpv_handle *handle_;

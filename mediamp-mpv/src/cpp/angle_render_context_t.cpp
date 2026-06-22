@@ -402,6 +402,10 @@ angle_render_context_t::angle_render_context_t(mpv_handle *mpv, int width, int h
 }
 
 angle_render_context_t::~angle_render_context_t() {
+    if (render_fence_) {
+        render_fence_->Release();
+        render_fence_ = nullptr;
+    }
     if (render_ctx_) {
         mpv_render_context_free(render_ctx_);
     }
@@ -469,6 +473,9 @@ bool angle_render_context_t::render() {
         // D3D12 imports it for zero-copy rendering
         glFinish();
 
+        // Signal D3D11 fence so D3D12 can wait for GPU completion
+        signalRenderFence();
+
         // Swap double-buffer: write becomes read, read becomes write
         int new_read = write_idx_;
         write_idx_ = read_idx_;
@@ -508,6 +515,63 @@ bool angle_render_context_t::render() {
 void *angle_render_context_t::getSharedTextureHandle() const {
     if (!use_shared_texture_) return nullptr;
     return shared_handles_[read_idx_];
+}
+
+void angle_render_context_t::signalRenderFence() {
+    if (!d3d11_device_) return;
+
+    // Lazily create the fence query
+    if (!render_fence_) {
+        D3D11_QUERY_DESC queryDesc = { D3D11_QUERY_EVENT, 0 };
+        HRESULT hr = d3d11_device_->CreateQuery(&queryDesc, &render_fence_);
+        if (FAILED(hr) || !render_fence_) {
+            LOG("signalRenderFence: CreateQuery failed, hr=0x%lX", hr);
+            return;
+        }
+    }
+
+    // Get ANGLE's D3D11 device context to insert the fence
+    // We need to query the device context from ANGLE's device
+    ID3D11DeviceContext *ctx = nullptr;
+    d3d11_device_->GetImmediateContext(&ctx);
+    if (ctx) {
+        ctx->End(render_fence_);
+        ctx->Release();
+        fence_pending_ = true;
+    }
+}
+
+bool angle_render_context_t::waitRenderFence() {
+    if (!render_fence_ || !fence_pending_) return true;
+
+    // Get ANGLE's D3D11 device context to check the fence
+    ID3D11DeviceContext *ctx = nullptr;
+    d3d11_device_->GetImmediateContext(&ctx);
+    if (!ctx) return false;
+
+    // Poll the fence with exponential backoff
+    // The GPU should complete very quickly (within microseconds)
+    HRESULT hr = S_FALSE;
+    int sleepMs = 0;  // Start with 0ms (just yield)
+    for (int i = 0; i < 100; i++) {
+        hr = ctx->GetData(render_fence_, nullptr, 0, 0);
+        if (hr == S_OK) break;
+        if (hr != S_FALSE) break;  // Error
+        // Exponential backoff: 0, 1, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, ...
+        Sleep(sleepMs);
+        if (sleepMs == 0) sleepMs = 1;
+        else if (sleepMs < 1000) sleepMs *= 2;
+    }
+
+    ctx->Release();
+
+    if (hr == S_OK) {
+        fence_pending_ = false;
+        return true;
+    }
+
+    // If still not ready, proceed anyway (fence will be checked next frame)
+    return false;
 }
 
 bool angle_render_context_t::readPixels(uint8_t *out, int out_size, int *out_width, int *out_height) {

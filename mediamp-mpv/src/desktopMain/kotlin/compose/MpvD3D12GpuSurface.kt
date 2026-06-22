@@ -92,9 +92,10 @@ private class D3D12GpuRenderer(
     private var queuePtr: Long = 0L
     private var devicePtr: Long = 0L
 
-    // Cached D3D12 resources per shared handle
+    // Cached D3D12 resources per shared handle (double-buffered, so max 2 entries)
     private val d3d12TextureCache = HashMap<Long, Long>()
     private val backendRTCache = HashMap<Long, BackendRenderTarget>()
+    private var lastUsedHandle = 0L
 
     // Current frame image (created on draw thread using Compose's DirectContext)
     @Volatile private var currentImage: Image? = null
@@ -181,6 +182,9 @@ private class D3D12GpuRenderer(
 
         var renderedFrames = 0L
         var lastStatTime = System.nanoTime()
+        var resolutionChecked = false
+        val resolutionOut = IntArray(2)
+        val minFramesForResolution = 30
 
         while (running) {
             try {
@@ -193,10 +197,40 @@ private class D3D12GpuRenderer(
 
                 renderedFrames++
 
+                // Wait for D3D11 render fence on render thread (not draw thread)
+                // This ensures ANGLE's GL commands are complete before D3D12 reads
+                handle.waitRenderFence()
+
                 // Store the shared handle for the draw thread to consume
                 val sharedHandle = handle.getAngleSharedTextureHandle()
                 if (sharedHandle != 0L) {
                     latestSharedHandle = sharedHandle
+                }
+
+                // Video resolution check - resize ANGLE context if needed
+                if (renderedFrames >= minFramesForResolution && (!resolutionChecked || renderedFrames % 60 == 0L)) {
+                    if (handle.queryVideoResolution(resolutionOut)) {
+                        val vw = resolutionOut[0]
+                        val vh = resolutionOut[1]
+                        if (vw > 0 && vh > 0) {
+                            // For 4K content, cap at 3840x2160; for others use native resolution
+                            val targetW = minOf(vw, 3840)
+                            val targetH = minOf(vh, 2160)
+                            if (targetW != frameWidth || targetH != frameHeight) {
+                                println("[D3D12Gpu] Resizing: ${frameWidth}x${frameHeight} -> ${targetW}x${targetH}")
+                                handle.resizeAngleRenderContext(targetW, targetH)
+                                frameWidth = targetW
+                                frameHeight = targetH
+                                // Invalidate all cached resources (they were for the old size)
+                                backendRTCache.clear()
+                                d3d12TextureCache.values.forEach { try { MPVHandle.releaseD3D12Resource(it) } catch (_: Exception) {} }
+                                d3d12TextureCache.clear()
+                                // Don't clear latestSharedHandle - let drawTo keep showing old frame
+                                // until a new frame arrives with the new resolution
+                                resolutionChecked = true
+                            }
+                        }
+                    }
                 }
 
                 // Stats
@@ -204,7 +238,7 @@ private class D3D12GpuRenderer(
                 val elapsed = now - lastStatTime
                 if (elapsed >= 5_000_000_000L) {
                     val fps = renderedFrames * 1_000_000_000.0 / elapsed
-                    println("[D3D12Gpu] FPS: ${"%.1f".format(fps)}, rendered=$renderedFrames")
+                    println("[D3D12Gpu] FPS: ${"%.1f".format(fps)}, rendered=$renderedFrames, resolution=${frameWidth}x${frameHeight}")
                     renderedFrames = 0
                     lastStatTime = now
                 }
@@ -217,11 +251,9 @@ private class D3D12GpuRenderer(
             }
         }
 
-        // Cleanup
-        backendRTCache.values.forEach { it.close() }
-        d3d12TextureCache.values.forEach { MPVHandle.releaseD3D12Resource(it) }
-        MPVHandle.releaseD3D12Resource(rawDevicePtr)
-        handle.destroyAngleRenderContext()
+        // Don't cleanup D3D12 resources here - stop() will handle it
+        // Just release the raw device pointer (extra AddRef from extractD3D12DevicePtr)
+        try { MPVHandle.releaseD3D12Resource(rawDevicePtr) } catch (_: Exception) {}
     }
 
     private var drawCount = 0L
@@ -247,66 +279,54 @@ private class D3D12GpuRenderer(
             return
         }
 
-        // Get or create D3D12 texture for this shared handle
-        var d3d12TexturePtr = d3d12TextureCache[sharedHandle]
-        if (d3d12TexturePtr == null) {
-            d3d12TexturePtr = MPVHandle.openSharedTextureOnD3D12(devicePtr, sharedHandle)
-            if (d3d12TexturePtr == 0L) {
-                println("[D3D12Gpu] Failed to open shared texture")
-                drawCount++
-                return
-            }
-            d3d12TextureCache[sharedHandle] = d3d12TexturePtr
-            if (drawCount <= 3) println("[D3D12Gpu] Opened D3D12 texture: handle=$sharedHandle, texture=$d3d12TexturePtr")
-        }
+        // Get or create cached Surface for this shared handle
+        val handleChanged = sharedHandle != lastUsedHandle
+        if (handleChanged) {
+            lastUsedHandle = sharedHandle
 
-        // Get or create BackendRenderTarget
-        var rt = backendRTCache[sharedHandle]
-        if (rt == null) {
-            rt = BackendRenderTarget.makeDirect3D(
-                w, h,
-                d3d12TexturePtr,
-                87, // DXGI_FORMAT_B8G8R8A8_UNORM
-                1, 1
-            )
+            // Get or create D3D12 texture for this shared handle
+            var d3d12TexturePtr = d3d12TextureCache[sharedHandle]
+            if (d3d12TexturePtr == null) {
+                d3d12TexturePtr = MPVHandle.openSharedTextureOnD3D12(devicePtr, sharedHandle)
+                if (d3d12TexturePtr == 0L) {
+                    drawCount++
+                    return
+                }
+                d3d12TextureCache[sharedHandle] = d3d12TexturePtr
+                if (drawCount <= 3) println("[D3D12Gpu] Opened D3D12 texture: handle=$sharedHandle")
+            }
+
+            // Get or create BackendRenderTarget
+            var rt = backendRTCache[sharedHandle]
             if (rt == null) {
-                println("[D3D12Gpu] Failed to create BackendRenderTarget")
-                drawCount++
-                return
+                rt = BackendRenderTarget.makeDirect3D(w, h, d3d12TexturePtr, 87, 1, 1)
+                if (rt == null) {
+                    drawCount++
+                    return
+                }
+                backendRTCache[sharedHandle] = rt
             }
-            backendRTCache[sharedHandle] = rt
-        }
 
-        // Create Surface from BackendRenderTarget using Compose's DirectContext
-        val surface = Surface.makeFromBackendRenderTarget(
-            directContext,
-            rt,
-            SurfaceOrigin.TOP_LEFT,
-            SurfaceColorFormat.BGRA_8888,
-            ColorSpace.sRGB,
-        )
+            // Create new Surface each time to get fresh content
+            // (cached Surface's makeImageSnapshot may return stale content)
+            val surface = Surface.makeFromBackendRenderTarget(
+                directContext, rt, SurfaceOrigin.TOP_LEFT,
+                SurfaceColorFormat.BGRA_8888, ColorSpace.sRGB,
+            )
 
-        if (surface != null) {
-            // Flush and wait for GPU to sync with D3D11 writes
-            directContext.flushAndSubmit(surface, true)
-
-            // Get GPU-backed image snapshot
-            val gpuImage = surface.makeImageSnapshot()
-            surface.close()
-
-            if (gpuImage != null) {
-                val oldImage = currentImage
-                currentImage = gpuImage
-                imageWidth = w
-                imageHeight = h
-                oldImage?.close()
-
-                if (drawCount <= 3 || drawCount % 300 == 0L) {
-                    println("[D3D12Gpu] drawTo: GPU image ${w}x${h}")
+            if (surface != null) {
+                // Flush and wait for GPU to ensure texture content is ready
+                directContext.flushAndSubmit(surface, true)
+                val gpuImage = surface.makeImageSnapshot()
+                surface.close()  // Close surface after getting snapshot
+                if (gpuImage != null) {
+                    val oldImage = currentImage
+                    currentImage = gpuImage
+                    imageWidth = w
+                    imageHeight = h
+                    try { oldImage?.close() } catch (_: Exception) {}
                 }
             }
-        } else {
-            if (drawCount <= 3) println("[D3D12Gpu] makeFromBackendRenderTarget returned null")
         }
 
         // Draw the current image to canvas
@@ -334,15 +354,33 @@ private class D3D12GpuRenderer(
         drawCount++
     }
 
+    @Volatile private var stopped = false
+
     fun stop() {
+        if (stopped) return
+        stopped = true
+        println("[D3D12Gpu] stop() called")
         running = false
+        // Close player first - this destroys the ANGLE render context,
+        // which causes waitForFrame() to exit its loop
+        try {
+            player.close()
+            println("[D3D12Gpu] player.close() succeeded")
+        } catch (e: Exception) {
+            println("[D3D12Gpu] player.close() exception: ${e.message}")
+        }
         renderThread?.let { t ->
             t.interrupt()
             t.join(5000)
         }
         renderThread = null
-        currentImage?.close()
+        try { currentImage?.close() } catch (_: Exception) {}
         currentImage = null
+        backendRTCache.values.forEach { try { it.close() } catch (_: Exception) {} }
+        backendRTCache.clear()
+        d3d12TextureCache.values.forEach { try { MPVHandle.releaseD3D12Resource(it) } catch (_: Exception) {} }
+        d3d12TextureCache.clear()
+        println("[D3D12Gpu] stop() completed")
     }
 
     private var dumpedComponents = false

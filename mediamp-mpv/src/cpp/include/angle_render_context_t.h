@@ -56,6 +56,11 @@ public:
     // Resize the render target
     bool resize(int width, int height);
 
+    // D3D11 fence for cross-API synchronization
+    // Call after render() to signal fence; call waitRenderFence() before D3D12 reads
+    void signalRenderFence();
+    bool waitRenderFence();
+
 private:
     mpv_handle *mpv_;
     mpv_render_context *render_ctx_ = nullptr;
@@ -81,6 +86,11 @@ private:
 
     void *saved_config_ = nullptr;  // EGLConfig saved for resize
     bool use_bgra_readback_ = false;  // Whether GL_BGRA_EXT is supported (unused in GPU path)
+
+    // D3D11 query fence for cross-API synchronization (D3D11→D3D12)
+    // Signaled after ANGLE renders, waited on by D3D12 before reading
+    ID3D11Query *render_fence_ = nullptr;
+    bool fence_pending_ = false;
 
     // CPU readback fallback (used if shared texture path fails)
     uint8_t *pixel_buffer_ = nullptr;

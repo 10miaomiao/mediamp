@@ -116,6 +116,8 @@ extern "C" {
     JNIEXPORT jlong JNICALL FN(nExtractD3D12DevicePtr)(JNIEnv *env, jclass clazz, jlong skikoOrDevicePtr);
     JNIEXPORT jboolean JNICALL FN(nValidateD3D12Device)(JNIEnv *env, jclass clazz, jlong devicePtr);
     JNIEXPORT jboolean JNICALL FN(nTransitionD3D12ResourceState)(JNIEnv *env, jclass clazz, jlong devicePtr, jlong queuePtr, jlong resourcePtr, jint fromState, jint toState);
+    JNIEXPORT void JNICALL FN(nSignalRenderFence)(JNIEnv *env, jclass clazz, jlong ptr);
+    JNIEXPORT jboolean JNICALL FN(nWaitRenderFence)(JNIEnv *env, jclass clazz, jlong ptr);
 
 /**
  * 关闭此 mpv_handle_t 实例
@@ -1144,6 +1146,21 @@ JNIEXPORT jlong JNICALL FN(nGetAngleD3D11Device)(JNIEnv *env, jclass clazz, jlon
     auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
     void *device = instance->get_angle_d3d11_device();
     return reinterpret_cast<jlong>(device);
+}
+
+// Signal D3D11 render fence after ANGLE rendering completes
+JNIEXPORT void JNICALL FN(nSignalRenderFence)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    auto* ctx = instance->get_angle_render_context();
+    if (ctx) ctx->signalRenderFence();
+}
+
+// Wait for D3D11 render fence (blocking until GPU completes)
+JNIEXPORT jboolean JNICALL FN(nWaitRenderFence)(JNIEnv *env, jclass clazz, jlong ptr) {
+    auto* instance = reinterpret_cast<mediampv::mpv_handle_t *>(static_cast<uintptr_t>(ptr));
+    auto* ctx = instance->get_angle_render_context();
+    if (!ctx) return JNI_FALSE;
+    return ctx->waitRenderFence() ? JNI_TRUE : JNI_FALSE;
 }
 
 // Read pixels from ANGLE D3D11 shared texture via cached staging texture.

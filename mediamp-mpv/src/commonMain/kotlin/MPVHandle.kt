@@ -277,6 +277,23 @@ class MPVHandle private constructor(internal val ptr: Long) : AutoCloseable {
     }
 
     /**
+     * Signal D3D11 render fence after ANGLE rendering completes.
+     * Call this after renderAngleFrame() to enable cross-API synchronization.
+     */
+    fun signalRenderFence() {
+        nSignalRenderFence(ptr)
+    }
+
+    /**
+     * Wait for D3D11 render fence to complete.
+     * Call this before D3D12 reads the shared texture.
+     * Returns true when the fence is signaled (GPU rendering complete).
+     */
+    fun waitRenderFence(): Boolean {
+        return nWaitRenderFence(ptr)
+    }
+
+    /**
      * Read pixels directly from the ANGLE D3D11 shared texture (bypasses glReadPixels).
      * Returns true on success, with width/height written to outSize.
      */
@@ -550,6 +567,8 @@ private external fun nGetAngleD3D11Device(ptr: Long): Long
 private external fun nReadPixelsFromSharedTexture(ptr: Long, outArray: ByteArray, outSize: IntArray): Boolean
 private external fun nBeginReadPixels(ptr: Long): Boolean
 private external fun nGetReadPixelsResult(ptr: Long, outArray: ByteArray, outSize: IntArray): Boolean
+private external fun nSignalRenderFence(ptr: Long)
+private external fun nWaitRenderFence(ptr: Long): Boolean
 
 // D3D12 interop: open shared HANDLE on a D3D12 device
 private external fun nOpenSharedTextureOnD3D12(d3d12DevicePtr: Long, sharedHandle: Long): Long
