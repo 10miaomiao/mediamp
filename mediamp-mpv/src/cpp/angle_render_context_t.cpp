@@ -553,9 +553,6 @@ bool angle_render_context_t::render() {
         // D3D12 imports it for zero-copy rendering
         glFinish();
 
-        // Signal D3D11 fence so D3D12 can wait for GPU completion
-        signalRenderFence();
-
         // Swap double-buffer: write becomes read, read becomes write
         int new_read = write_idx_;
         write_idx_ = read_idx_;
@@ -629,18 +626,15 @@ bool angle_render_context_t::waitRenderFence() {
     d3d11_device_->GetImmediateContext(&ctx);
     if (!ctx) return false;
 
-    // Poll the fence with exponential backoff
-    // The GPU should complete very quickly (within microseconds)
+    // Poll the fence with a short wait
+    // GPU should complete very quickly (within microseconds)
     HRESULT hr = S_FALSE;
-    int sleepMs = 0;  // Start with 0ms (just yield)
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 10; i++) {
         hr = ctx->GetData(render_fence_, nullptr, 0, 0);
         if (hr == S_OK) break;
         if (hr != S_FALSE) break;  // Error
-        // Exponential backoff: 0, 1, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, ...
-        Sleep(sleepMs);
-        if (sleepMs == 0) sleepMs = 1;
-        else if (sleepMs < 1000) sleepMs *= 2;
+        // Short yield to avoid busy-waiting
+        Sleep(0);  // Yield to other threads
     }
 
     ctx->Release();
@@ -650,7 +644,7 @@ bool angle_render_context_t::waitRenderFence() {
         return true;
     }
 
-    // If still not ready, proceed anyway (fence will be checked next frame)
+    // GPU not ready yet - caller should skip this frame and retry
     return false;
 }
 

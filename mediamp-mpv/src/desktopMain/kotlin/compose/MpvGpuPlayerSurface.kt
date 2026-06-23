@@ -121,6 +121,15 @@ private class GpuTextureRenderer(private val player: MpvMediampPlayer) {
             try {
                 // Initialize shared GL context on first iteration
                 if (directContext == null) {
+                    // Create mpv's GL render context first (required for setupContext)
+                    val glOk = handle.createGlRenderContext(1920, 1080)
+                    if (!glOk) {
+                        log("[GpuRender] Failed to create GL render context")
+                        Thread.sleep(1000)
+                        continue
+                    }
+                    log("[GpuRender] GL render context created")
+
                     setupContext()
                     if (directContext == null) {
                         Thread.sleep(1000)
@@ -303,16 +312,24 @@ private class GpuTextureRenderer(private val player: MpvMediampPlayer) {
         )
     }
 
+    @Volatile private var stopped = false
+
     fun stop() {
-        // 1. Signal render thread to exit
+        if (stopped) return
+        stopped = true
+
+        // 1. Close player first (destroys GL context, wakes up render thread)
+        try { player.close() } catch (_: Exception) {}
+
+        // 2. Signal render thread to exit
         running = false
         renderThread?.let { t ->
             t.interrupt()
-            t.isDaemon = true
+            t.join(5000)
         }
         renderThread = null
 
-        // 2. Clean up GL resources
+        // 3. Clean up GL resources
         currentImage?.close()
         currentImage = null
         directContext?.close()
