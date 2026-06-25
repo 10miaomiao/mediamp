@@ -549,8 +549,6 @@ bool angle_render_context_t::render() {
         }
 
         // glFinish waits for all GL commands to complete on GPU
-        // This ensures the D3D11 shared texture is fully written before
-        // D3D12 imports it for zero-copy rendering
         glFinish();
 
         // Swap double-buffer: write becomes read, read becomes write

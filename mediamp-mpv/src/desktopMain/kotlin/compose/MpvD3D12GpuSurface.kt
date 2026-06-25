@@ -80,6 +80,8 @@ private class D3D12GpuRenderer(
 
     // Reusable Skia bitmap for creating images
     private val skiaBitmap = Bitmap()
+    private var lastDrawW = 0
+    private var lastDrawH = 0
 
     val failed = mutableStateOf(false)
 
@@ -100,7 +102,6 @@ private class D3D12GpuRenderer(
     private fun renderLoop() {
         println("[D3D12Gpu] renderLoop started")
 
-        // Create ANGLE render context on render thread
         val angleOk = handle.createAngleRenderContext(1920, 1080)
         if (!angleOk) {
             println("[D3D12Gpu] Failed to create ANGLE render context")
@@ -114,6 +115,7 @@ private class D3D12GpuRenderer(
         var currentW = 1920
         var currentH = 1080
         var resolutionChecked = false
+        var framesSinceResize = 0  // skip readback right after resize
         val resolutionOut = IntArray(2)
         val sizeOut = IntArray(2)
 
@@ -122,13 +124,18 @@ private class D3D12GpuRenderer(
                 handle.waitForFrame()
                 if (!running) break
 
-                // Render mpv frame via ANGLE (D3D11 shared texture)
                 val rendered = handle.renderAngleFrame()
                 if (!rendered) continue
-
                 renderedFrames++
 
-                // Read pixels from ANGLE D3D11 texture (sync, reliable)
+                // Skip readback for a few frames after resize — the shared textures
+                // were just recreated and may not have valid content yet
+                if (framesSinceResize >= 0 && framesSinceResize < 3) {
+                    framesSinceResize++
+                    continue
+                }
+
+                // Sync readback from ANGLE D3D11 shared texture
                 val bufferSize = currentW * currentH * 4
                 if (pixelBuffers[writeIdx].size < bufferSize) {
                     pixelBuffers[writeIdx] = ByteArray(bufferSize)
@@ -139,7 +146,6 @@ private class D3D12GpuRenderer(
                     val w = sizeOut[0]
                     val h = sizeOut[1]
                     if (w > 0 && h > 0) {
-                        // Swap buffers
                         val tmp = writeIdx
                         writeIdx = readIdx
                         readIdx = tmp
@@ -161,12 +167,12 @@ private class D3D12GpuRenderer(
                                 currentW = targetW
                                 currentH = targetH
                                 resolutionChecked = true
+                                framesSinceResize = 0  // start skip counter
                             }
                         }
                     }
                 }
 
-                // Stats
                 val now = System.nanoTime()
                 val elapsed = now - lastStatTime
                 if (elapsed >= 5_000_000_000L) {
@@ -184,14 +190,12 @@ private class D3D12GpuRenderer(
             }
         }
 
-        // Cleanup
         handle.destroyAngleRenderContext()
     }
 
     private var drawCount = 0L
 
     fun drawTo(canvas: org.jetbrains.skia.Canvas, canvasSize: Size) {
-        // Check if a new frame is available from the render thread
         if (newFrameReady) {
             newFrameReady = false
 
@@ -200,10 +204,12 @@ private class D3D12GpuRenderer(
             val h = handle.getAngleHeight()
 
             if (w > 0 && h > 0 && pixels.size >= w * h * 4) {
-                // Create Skia Image from CPU pixels
-                val imageInfo = ImageInfo.makeN32Premul(w, h)
-                skiaBitmap.allocPixels(imageInfo)
-                skiaBitmap.installPixels(imageInfo, pixels, w * 4)
+                if (w != lastDrawW || h != lastDrawH) {
+                    skiaBitmap.allocPixels(ImageInfo.makeN32Premul(w, h))
+                    lastDrawW = w
+                    lastDrawH = h
+                }
+                skiaBitmap.installPixels(ImageInfo.makeN32Premul(w, h), pixels, w * 4)
                 val newImage = Image.makeFromBitmap(skiaBitmap)
 
                 if (newImage != null) {
@@ -216,7 +222,6 @@ private class D3D12GpuRenderer(
             }
         }
 
-        // Draw the current image to canvas
         val image = currentImage ?: run { drawCount++; return }
         if (imageWidth <= 0 || imageHeight <= 0) { drawCount++; return }
 
