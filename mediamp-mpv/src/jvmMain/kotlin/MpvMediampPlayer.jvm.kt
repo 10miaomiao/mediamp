@@ -26,6 +26,7 @@ import kotlin.coroutines.CoroutineContext
 actual class MpvMediampPlayer (
     context: Any,
     parentCoroutineContext: CoroutineContext,
+    private val vo: String = "libmpv",
 ) : AbstractMediampPlayer<MpvMediampPlayer.MPVPlayerData>(parentCoroutineContext) {
     class MPVPlayerData(mediaData: MediaData) : Data(mediaData)
 
@@ -48,13 +49,20 @@ actual class MpvMediampPlayer (
         override fun onPropertyChange(name: String, value: Long) {
             when (name) {
                 "time-pos/full" -> currentPositionMillis.value = value * 1000
-                "duration/full" -> mediaProperties.value =
-                    if (mediaProperties.value == null) MediaProperties(null, value * 1000)
-                    else mediaProperties.value?.copy(durationMillis = value * 1000)
             }
         }
 
         override fun onPropertyChange(name: String, value: Double) {
+            when (name) {
+                "duration" -> {
+                    if (value > 0) {
+                        val durationMillis = (value * 1000).toLong()
+                        mediaProperties.value =
+                            if (mediaProperties.value == null) MediaProperties(null, durationMillis)
+                            else mediaProperties.value?.copy(durationMillis = durationMillis)
+                    }
+                }
+            }
         }
 
         override fun onPropertyChange(name: String, value: String) {
@@ -92,8 +100,8 @@ actual class MpvMediampPlayer (
 
         handle.option("config", "no")
 
-        // 使用 vo=libmpv，由 render context (ANGLE/SW) 驱动渲染
-        handle.option("vo", "libmpv")
+        // vo 参数：libmpv 用于 render context 回读，gpu 用于 HWND 嵌入
+        handle.option("vo", vo)
 
         when (currentPlatform()) {
             is Platform.Android -> {
@@ -110,7 +118,7 @@ actual class MpvMediampPlayer (
             else -> { }
         }
 
-        handle.option("hwdec", "auto")
+        handle.option("hwdec", "auto-safe")
         handle.option("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
         handle.option("sw-fast", "yes")
         handle.option("input-default-bindings", "yes")
@@ -131,7 +139,7 @@ actual class MpvMediampPlayer (
         // SW 渲染上下文也延迟到渲染线程创建（ANGLE 初始化失败时的回退方案）
 
         handle.observeProperty("time-pos/full", MPVFormat.MPV_FORMAT_INT64)
-        handle.observeProperty("duration/full", MPVFormat.MPV_FORMAT_INT64)
+        handle.observeProperty("duration", MPVFormat.MPV_FORMAT_DOUBLE)
         handle.observeProperty("pause", MPVFormat.MPV_FORMAT_FLAG)
         handle.observeProperty("paused-for-cache", MPVFormat.MPV_FORMAT_FLAG)
         handle.observeProperty("speed", MPVFormat.MPV_FORMAT_STRING) // todo
@@ -265,12 +273,14 @@ actual class MpvMediampPlayer (
     }
 
     override fun seekTo(positionMillis: Long) {
-        handle.command("seek", positionMillis.toString(), "absolute+exact")
+        val positionSeconds = positionMillis / 1000.0
+        handle.command("seek", positionSeconds.toString(), "absolute+exact")
         currentPositionMillis.value = positionMillis
     }
 
     override fun skip(deltaMillis: Long) {
-        handle.command("seek", deltaMillis.toString(), "relative+relative")
+        val deltaSeconds = deltaMillis / 1000.0
+        handle.command("seek", deltaSeconds.toString(), "relative+relative")
         currentPositionMillis.value += deltaMillis
     }
 
